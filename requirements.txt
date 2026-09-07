@@ -1,1 +1,5 @@
+markdown-it-py==4.2.0
+mdurl==0.1.2
+Pygments==2.21.0
+rich==14.1.0
 websockets==17.0.1

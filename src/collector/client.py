@@ -23,6 +23,7 @@ BINANCE_WEBSOCKET_URL = "wss://stream.binance.com:9443/ws"
 
 Message = str | bytes
 MessageHandler = Callable[[Message], None | Awaitable[None]]
+StatusHandler = Callable[[str, str], None]
 
 
 class MessageHandlerError(RuntimeError):
@@ -45,6 +46,7 @@ class BinanceCollector:
         reconnect_policy: ReconnectPolicy | None = None,
         connection_factory: Callable[..., Any] = connect,
         logger: logging.Logger | None = None,
+        status_handler: StatusHandler | None = None,
     ) -> None:
         self.url = url
         self.symbols = normalize_symbols(symbols)
@@ -52,6 +54,11 @@ class BinanceCollector:
         self.reconnect_policy = reconnect_policy or ReconnectPolicy()
         self._connection_factory = connection_factory
         self._logger = logger or logging.getLogger(__name__)
+        self._status_handler = status_handler
+
+    def _report_status(self, category: str, value: str) -> None:
+        if self._status_handler is not None:
+            self._status_handler(category, value)
 
     async def run(
         self,
@@ -62,28 +69,42 @@ class BinanceCollector:
 
         self.reconnect_policy.reset()
 
-        while not stop_event.is_set():
-            try:
-                await self._collect_once(handler, stop_event)
-            except asyncio.CancelledError:
-                raise
-            except MessageHandlerError:
-                raise
-            except SubscriptionError as error:
-                self._logger.warning("Binance 스트림 구독에 실패했습니다: %s", error)
-            except (ConnectionClosed, OSError, TimeoutError) as error:
-                self._logger.warning(
-                    "Binance WebSocket 연결이 종료되었습니다: %s",
-                    type(error).__name__,
-                )
+        try:
+            while not stop_event.is_set():
+                self._report_status("connection", "연결 중")
+                self._report_status("subscription", "구독 대기")
+                try:
+                    await self._collect_once(handler, stop_event)
+                except asyncio.CancelledError:
+                    raise
+                except MessageHandlerError:
+                    raise
+                except SubscriptionError as error:
+                    message = str(error)
+                    self._report_status("subscription", "구독 실패")
+                    self._report_status("error", message)
+                    self._logger.warning(
+                        "Binance 스트림 구독에 실패했습니다: %s", error
+                    )
+                except (ConnectionClosed, OSError, TimeoutError) as error:
+                    error_name = type(error).__name__
+                    self._report_status("connection", "연결 끊김")
+                    self._report_status("error", error_name)
+                    self._logger.warning(
+                        "Binance WebSocket 연결이 종료되었습니다: %s",
+                        error_name,
+                    )
 
-            if stop_event.is_set():
-                return
+                if stop_event.is_set():
+                    return
 
-            delay = self.reconnect_policy.next_delay()
-            self._logger.info("%.0f초 후 Binance에 재연결합니다.", delay)
-            if await wait_for_reconnect(delay, stop_event):
-                return
+                delay = self.reconnect_policy.next_delay()
+                self._report_status("connection", f"재연결 대기 {delay:.0f}초")
+                self._logger.info("%.0f초 후 Binance에 재연결합니다.", delay)
+                if await wait_for_reconnect(delay, stop_event):
+                    return
+        finally:
+            self._report_status("connection", "종료됨")
 
     async def _collect_once(
         self,
@@ -99,6 +120,8 @@ class BinanceCollector:
             max_queue=16,
         ) as websocket:
             self._logger.info("Binance WebSocket에 연결되었습니다.")
+            self._report_status("connection", "연결됨")
+            self._report_status("subscription", "구독 요청 중")
             await websocket.send(build_subscribe_request(self.symbols))
             subscription_deadline = (
                 asyncio.get_running_loop().time() + self.subscription_timeout
@@ -120,13 +143,23 @@ class BinanceCollector:
                 if message is None:
                     return
 
-                await self._handle_message(handler, message)
+                handled = await self._handle_message_or_stop(
+                    handler,
+                    message,
+                    stop_event,
+                )
+                if not handled:
+                    return
                 self.reconnect_policy.reset()
                 response = parse_subscription_response(message)
                 if response is not None:
                     if response.kind is SubscriptionResponseKind.ERROR:
                         raise SubscriptionError(response.detail or "unknown")
                     subscription_confirmed = True
+                    self._report_status(
+                        "subscription",
+                        f"{len(self.symbols)}개 구독 확인",
+                    )
                     self._logger.info(
                         "%d개 aggTrade 스트림 구독이 확인되었습니다.",
                         len(self.symbols),
@@ -187,6 +220,39 @@ class BinanceCollector:
             raise MessageHandlerError(
                 "수신 메시지의 표준화 또는 출력에 실패했습니다."
             ) from error
+
+    @classmethod
+    async def _handle_message_or_stop(
+        cls,
+        handler: MessageHandler,
+        message: Message,
+        stop_event: asyncio.Event,
+    ) -> bool:
+        """전달 완료와 종료 요청을 함께 기다리고 미완료 전달을 취소한다."""
+
+        handler_task = asyncio.create_task(cls._handle_message(handler, message))
+        stop_task = asyncio.create_task(stop_event.wait())
+        try:
+            completed, _ = await asyncio.wait(
+                {handler_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if handler_task in completed:
+                await handler_task
+                return True
+
+            handler_task.cancel()
+            await asyncio.gather(handler_task, return_exceptions=True)
+            return False
+        finally:
+            for task in (handler_task, stop_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(
+                handler_task,
+                stop_task,
+                return_exceptions=True,
+            )
 
     @staticmethod
     def _is_server_shutdown(message: Message) -> bool:

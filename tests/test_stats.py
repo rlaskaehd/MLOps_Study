@@ -24,16 +24,10 @@ class StatsCollectorTests(unittest.TestCase):
 
     def test_reports_last_completed_second_with_matching_total(self) -> None:
         self.clock.value = 0.2
-        self.stats.record_received(
-            {"event_type": "aggTrade", "symbol": "BTCUSDT"}
-        )
-        self.stats.record_received(
-            {"event_type": "aggTrade", "symbol": "BTCUSDT"}
-        )
+        self.stats.record_received({"event_type": "aggTrade", "symbol": "BTCUSDT"})
+        self.stats.record_received({"event_type": "aggTrade", "symbol": "BTCUSDT"})
         self.clock.value = 0.9
-        self.stats.record_received(
-            {"event_type": "aggTrade", "symbol": "ETHUSDT"}
-        )
+        self.stats.record_received({"event_type": "aggTrade", "symbol": "ETHUSDT"})
         self.stats.record_received({"result": None, "id": 1})
 
         self.clock.value = 1.0
@@ -49,9 +43,7 @@ class StatsCollectorTests(unittest.TestCase):
 
     def test_empty_completed_interval_is_zero_without_losing_cumulative(self) -> None:
         self.clock.value = 0.4
-        self.stats.record_received(
-            {"event_type": "aggTrade", "symbol": "BTCUSDT"}
-        )
+        self.stats.record_received({"event_type": "aggTrade", "symbol": "BTCUSDT"})
         self.clock.value = 2.0
 
         snapshot = self.stats.snapshot()
@@ -67,9 +59,7 @@ class StatsCollectorTests(unittest.TestCase):
         event = {"event_type": "aggTrade", "symbol": "BTCUSDT", "a": 1}
         self.stats.record_received(event)
         self.stats.record_received(event)
-        self.stats.record_received(
-            {"event_type": "aggTrade", "symbol": "UNKNOWN"}
-        )
+        self.stats.record_received({"event_type": "aggTrade", "symbol": "UNKNOWN"})
 
         snapshot = self.stats.snapshot()
 

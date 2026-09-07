@@ -88,6 +88,9 @@ class StatsCollector:
 
         self._forwarded_messages += 1
 
+    def set_output_connected(self, connected: bool) -> None:
+        self._output_connected = connected
+
     def set_connection_state(self, state: str) -> None:
         self._connection_state = state
 
@@ -96,6 +99,16 @@ class StatsCollector:
 
     def record_error(self, message: str) -> None:
         self._recent_error = message
+
+    def record_collector_status(self, category: str, value: str) -> None:
+        """수집기 상태 콜백을 화면 상태 필드에 반영한다."""
+
+        if category == "connection":
+            self.set_connection_state(value)
+        elif category == "subscription":
+            self.set_subscription_state(value)
+        elif category == "error":
+            self.record_error(value)
 
     def snapshot(self) -> StatsSnapshot:
         """직전 완료된 1초 구간과 누적 상태를 함께 반환한다."""

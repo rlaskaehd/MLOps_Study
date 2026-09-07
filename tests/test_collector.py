@@ -14,6 +14,8 @@ from src.collector.client import BinanceCollector, MessageHandlerError
 from src.collector.parser import normalize_message
 from src.collector.reconnect import ReconnectPolicy
 from src.main import create_message_handler, run_collector
+from src.models.event import Event
+from src.monitoring.stats import StatsCollector
 from src.outputs.stdout import StdoutOutput
 
 
@@ -91,6 +93,26 @@ class FakeCollectorRunner:
             if inspect.isawaitable(result):
                 await result
         stop_event.set()
+
+
+class StopAfterOutput:
+    def __init__(self, stop_event: asyncio.Event, expected: int) -> None:
+        self._stop_event = stop_event
+        self._expected = expected
+        self.events: list[Event] = []
+        self.opened = False
+        self.closed = False
+
+    async def open(self) -> None:
+        self.opened = True
+
+    async def write(self, event: Event) -> None:
+        self.events.append(event)
+        if len(self.events) == self._expected:
+            self._stop_event.set()
+
+    async def close(self) -> None:
+        self.closed = True
 
 
 class NormalizeMessageTests(unittest.TestCase):
@@ -280,6 +302,43 @@ class BinanceCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(received, [ack, message])
         self.assertEqual(len(factory.calls), 2)
 
+    async def test_reconnect_keeps_stats_and_same_output_object(self) -> None:
+        ack = '{"result":null,"id":1}'
+        btc = '{"e":"aggTrade","s":"BTCUSDT","a":1}'
+        eth = '{"e":"aggTrade","s":"ETHUSDT","a":2}'
+        factory = FakeConnectionFactory([OSError("temporary"), [ack, btc, eth]])
+        collector = BinanceCollector(
+            symbols=("BTCUSDT", "ETHUSDT"),
+            connection_factory=factory,
+            reconnect_policy=ReconnectPolicy(delays=(0,)),
+        )
+        stop_event = asyncio.Event()
+        output = StopAfterOutput(stop_event, expected=3)
+        stats = StatsCollector(
+            ("BTCUSDT", "ETHUSDT"),
+            output_connected=True,
+        )
+
+        await run_collector(
+            symbols=("BTCUSDT", "ETHUSDT"),
+            collector=collector,
+            output=output,
+            stats=stats,
+            stop_event=stop_event,
+            manage_signals=False,
+        )
+
+        self.assertEqual(len(factory.calls), 2)
+        self.assertTrue(output.opened)
+        self.assertTrue(output.closed)
+        self.assertEqual(
+            [event.get("symbol") for event in output.events],
+            [None, "BTCUSDT", "ETHUSDT"],
+        )
+        snapshot = stats.snapshot()
+        self.assertEqual(snapshot.cumulative_trades, 2)
+        self.assertEqual(snapshot.forwarded_messages, 3)
+
     async def test_outputs_server_shutdown_before_reconnecting(self) -> None:
         ack = '{"result":null,"id":1}'
         shutdown = '{"e":"serverShutdown","E":1788783123456}'
@@ -369,6 +428,58 @@ class BinanceCollectorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(task.done())
 
+    async def test_stop_event_cancels_unfinished_message_delivery(self) -> None:
+        ack = '{"result":null,"id":1}'
+        trade = '{"e":"aggTrade","s":"BTCUSDT","a":1}'
+        factory = FakeConnectionFactory([[ack, trade]])
+        collector = BinanceCollector(
+            symbols=("BTCUSDT",),
+            connection_factory=factory,
+            reconnect_policy=ReconnectPolicy(delays=(0,)),
+        )
+        stop_event = asyncio.Event()
+        write_started = asyncio.Event()
+        write_cancelled = asyncio.Event()
+
+        async def handler(message: str | bytes) -> None:
+            if message == ack:
+                return
+            write_started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                write_cancelled.set()
+
+        task = asyncio.create_task(collector.run(handler, stop_event))
+        await write_started.wait()
+        stop_event.set()
+        await asyncio.wait_for(task, timeout=1)
+
+        self.assertTrue(write_cancelled.is_set())
+
+    async def test_reports_connection_and_subscription_status(self) -> None:
+        ack = '{"result":null,"id":1}'
+        trade = '{"e":"aggTrade","s":"BTCUSDT","a":1}'
+        factory = FakeConnectionFactory([[ack, trade]])
+        statuses: list[tuple[str, str]] = []
+        collector = BinanceCollector(
+            symbols=("BTCUSDT",),
+            connection_factory=factory,
+            reconnect_policy=ReconnectPolicy(delays=(0,)),
+            status_handler=lambda category, value: statuses.append((category, value)),
+        )
+        stop_event = asyncio.Event()
+
+        def handler(message: str | bytes) -> None:
+            if message == trade:
+                stop_event.set()
+
+        await collector.run(handler, stop_event)
+
+        self.assertIn(("connection", "연결됨"), statuses)
+        self.assertIn(("subscription", "1개 구독 확인"), statuses)
+        self.assertEqual(statuses[-1], ("connection", "종료됨"))
+
     async def test_does_not_hide_handler_failure_as_reconnect(self) -> None:
         factory = FakeConnectionFactory([["message"]])
         collector = BinanceCollector(
@@ -405,9 +516,7 @@ class MainIntegrationTests(unittest.IsolatedAsyncioTestCase):
         invalid_message = '{"e":"aggTrade"'
         await handler(invalid_message)
 
-        output_events = [
-            json.loads(line) for line in stdout.getvalue().splitlines()
-        ]
+        output_events = [json.loads(line) for line in stdout.getvalue().splitlines()]
         self.assertEqual(
             output_events,
             [

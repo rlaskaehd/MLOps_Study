@@ -6,7 +6,8 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+
+from src.collector.parser import normalize_message
 
 
 SUBSCRIPTION_REQUEST_ID = 1
@@ -51,12 +52,10 @@ def parse_subscription_response(
 ) -> SubscriptionResponse | None:
     """현재 구독 요청에 해당하는 성공 또는 오류 응답만 판별한다."""
 
-    if not isinstance(message, str):
+    normalized = normalize_message(message)
+    if normalized.warning is not None:
         return None
-    try:
-        payload: Any = json.loads(message)
-    except (json.JSONDecodeError, TypeError):
-        return None
+    payload = normalized.event
     if not isinstance(payload, dict) or payload.get("id") != request_id:
         return None
     if "result" in payload and payload["result"] is None:

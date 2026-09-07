@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import json
+import logging
 import unittest
 from collections.abc import Sequence
 from typing import Any
@@ -11,6 +12,7 @@ from typing import Any
 from src.collector.client import BinanceCollector, MessageHandlerError
 from src.collector.parser import normalize_message
 from src.collector.reconnect import ReconnectPolicy
+from src.main import create_message_handler, run_collector
 from src.outputs.stdout import StdoutOutput
 
 
@@ -67,6 +69,16 @@ class FakeConnectionFactory:
     def __call__(self, url: str, **kwargs: Any) -> FakeConnectionContext:
         self.calls.append((url, kwargs))
         return FakeConnectionContext(next(self._outcomes))
+
+
+class FakeCollectorRunner:
+    def __init__(self, messages: Sequence[str | bytes]) -> None:
+        self._messages = messages
+
+    async def run(self, handler: Any, stop_event: asyncio.Event) -> None:
+        for message in self._messages:
+            handler(message)
+        stop_event.set()
 
 
 class NormalizeMessageTests(unittest.TestCase):
@@ -298,6 +310,58 @@ class BinanceCollectorTests(unittest.IsolatedAsyncioTestCase):
             await collector.run(failing_handler, stop_event)
 
         self.assertEqual(len(factory.calls), 1)
+
+
+class MainIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def make_logger(stream: io.StringIO) -> logging.Logger:
+        logger = logging.Logger("test_binance_collector")
+        logger.addHandler(logging.StreamHandler(stream))
+        return logger
+
+    def test_handler_writes_data_to_stdout_and_warning_to_logger(self) -> None:
+        stdout = RecordingStream()
+        stderr = io.StringIO()
+        handler = create_message_handler(
+            StdoutOutput(stdout),
+            self.make_logger(stderr),
+        )
+
+        handler('{"e":"aggTrade","p":"1.00"}')
+        invalid_message = '{"e":"aggTrade"'
+        handler(invalid_message)
+
+        output_events = [
+            json.loads(line) for line in stdout.getvalue().splitlines()
+        ]
+        self.assertEqual(
+            output_events,
+            [
+                {"event_type": "aggTrade", "price": "1.00"},
+                {"raw_message": invalid_message},
+            ],
+        )
+        self.assertNotIn("aggTrade", stderr.getvalue())
+        self.assertIn("invalid_json", stderr.getvalue())
+
+    async def test_run_collector_keeps_duplicate_messages(self) -> None:
+        message = '{"e":"aggTrade","a":1}'
+        collector = FakeCollectorRunner([message, message])
+        stdout = RecordingStream()
+        stderr = io.StringIO()
+        stop_event = asyncio.Event()
+
+        await run_collector(
+            collector=collector,  # type: ignore[arg-type]
+            output=StdoutOutput(stdout),
+            stop_event=stop_event,
+            logger=self.make_logger(stderr),
+            manage_signals=False,
+        )
+
+        lines = stdout.getvalue().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[0]), json.loads(lines[1]))
 
 
 if __name__ == "__main__":

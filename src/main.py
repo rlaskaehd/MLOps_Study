@@ -4,10 +4,11 @@ import asyncio
 import logging
 import signal
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from src.collector.client import BinanceCollector, Message, MessageHandlerError
 from src.collector.parser import normalize_message
+from src.config import DEFAULT_SYMBOLS, parse_args
 from src.outputs.stdout import StdoutOutput
 
 
@@ -66,6 +67,7 @@ def remove_signal_handlers(installed: list[signal.Signals]) -> None:
 
 async def run_collector(
     *,
+    symbols: Sequence[str] = DEFAULT_SYMBOLS,
     collector: BinanceCollector | None = None,
     output: StdoutOutput | None = None,
     stop_event: asyncio.Event | None = None,
@@ -74,7 +76,10 @@ async def run_collector(
 ) -> None:
     """실행 구성요소를 연결하고 종료 시 WebSocket을 정리한다."""
 
-    active_collector = collector or BinanceCollector(logger=logger)
+    active_collector = collector or BinanceCollector(
+        symbols=tuple(symbols),
+        logger=logger,
+    )
     active_output = output or StdoutOutput()
     active_stop_event = stop_event or asyncio.Event()
     installed = (
@@ -90,11 +95,12 @@ async def run_collector(
         remove_signal_handlers(installed)
 
 
-def main() -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     configure_logging()
+    config = parse_args(argv)
 
     try:
-        asyncio.run(run_collector())
+        asyncio.run(run_collector(symbols=config.symbols))
     except KeyboardInterrupt:
         LOGGER.info("종료 요청을 받아 수집기를 종료했습니다.")
     except MessageHandlerError:

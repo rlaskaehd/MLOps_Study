@@ -29,6 +29,10 @@ class RecordingStream(io.StringIO):
 class FakeWebSocket:
     def __init__(self, messages: Sequence[str | bytes]) -> None:
         self._messages = iter(messages)
+        self.sent: list[str] = []
+
+    async def send(self, message: str) -> None:
+        self.sent.append(message)
 
     async def recv(self) -> str | bytes:
         try:
@@ -43,11 +47,13 @@ class FakeWebSocket:
 class FakeConnectionContext:
     def __init__(self, outcome: Sequence[str | bytes] | BaseException) -> None:
         self._outcome = outcome
+        self.websocket: FakeWebSocket | None = None
 
     async def __aenter__(self) -> FakeWebSocket:
         if isinstance(self._outcome, BaseException):
             raise self._outcome
-        return FakeWebSocket(self._outcome)
+        self.websocket = FakeWebSocket(self._outcome)
+        return self.websocket
 
     async def __aexit__(
         self,
@@ -65,10 +71,13 @@ class FakeConnectionFactory:
     ) -> None:
         self._outcomes = iter(outcomes)
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.contexts: list[FakeConnectionContext] = []
 
     def __call__(self, url: str, **kwargs: Any) -> FakeConnectionContext:
         self.calls.append((url, kwargs))
-        return FakeConnectionContext(next(self._outcomes))
+        context = FakeConnectionContext(next(self._outcomes))
+        self.contexts.append(context)
+        return context
 
 
 class FakeCollectorRunner:
@@ -216,7 +225,9 @@ class ReconnectPolicyTests(unittest.TestCase):
 
 class BinanceCollectorTests(unittest.IsolatedAsyncioTestCase):
     async def test_delivers_every_message_in_receive_order(self) -> None:
+        ack = '{"result":null,"id":1}'
         messages = [
+            ack,
             '{"e":"aggTrade","a":1}',
             '{"e":"aggTrade","a":1}',
             '{"e":"aggTrade","a":2}',
@@ -238,10 +249,15 @@ class BinanceCollectorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(received, messages)
         self.assertEqual(factory.calls[0][1]["max_queue"], 16)
+        assert factory.contexts[0].websocket is not None
+        request = json.loads(factory.contexts[0].websocket.sent[0])
+        self.assertEqual(request["method"], "SUBSCRIBE")
+        self.assertEqual(len(request["params"]), 10)
 
     async def test_reconnects_after_transient_connection_failure(self) -> None:
+        ack = '{"result":null,"id":1}'
         message = '{"e":"aggTrade","a":1}'
-        factory = FakeConnectionFactory([OSError("temporary"), [message]])
+        factory = FakeConnectionFactory([OSError("temporary"), [ack, message]])
         collector = BinanceCollector(
             connection_factory=factory,
             reconnect_policy=ReconnectPolicy(delays=(0,)),
@@ -251,17 +267,19 @@ class BinanceCollectorTests(unittest.IsolatedAsyncioTestCase):
 
         def handler(value: str | bytes) -> None:
             received.append(value)
-            stop_event.set()
+            if value == message:
+                stop_event.set()
 
         await collector.run(handler, stop_event)
 
-        self.assertEqual(received, [message])
+        self.assertEqual(received, [ack, message])
         self.assertEqual(len(factory.calls), 2)
 
     async def test_outputs_server_shutdown_before_reconnecting(self) -> None:
+        ack = '{"result":null,"id":1}'
         shutdown = '{"e":"serverShutdown","E":1788783123456}'
         trade = '{"e":"aggTrade","a":1}'
-        factory = FakeConnectionFactory([[shutdown], [trade]])
+        factory = FakeConnectionFactory([[ack, shutdown], [ack, trade]])
         collector = BinanceCollector(
             connection_factory=factory,
             reconnect_policy=ReconnectPolicy(delays=(0,)),
@@ -276,8 +294,59 @@ class BinanceCollectorTests(unittest.IsolatedAsyncioTestCase):
 
         await collector.run(handler, stop_event)
 
-        self.assertEqual(received, [shutdown, trade])
+        self.assertEqual(received, [ack, shutdown, ack, trade])
         self.assertEqual(len(factory.calls), 2)
+
+    async def test_reconnects_and_resubscribes_after_subscription_error(self) -> None:
+        rejected = '{"code":2,"msg":"invalid request","id":1}'
+        ack = '{"result":null,"id":1}'
+        trade = '{"e":"aggTrade","s":"BTCUSDT","a":1}'
+        factory = FakeConnectionFactory([[rejected], [ack, trade]])
+        collector = BinanceCollector(
+            symbols=("BTCUSDT", "ETHUSDT"),
+            connection_factory=factory,
+            reconnect_policy=ReconnectPolicy(delays=(0,)),
+        )
+        stop_event = asyncio.Event()
+        received: list[str | bytes] = []
+
+        def handler(message: str | bytes) -> None:
+            received.append(message)
+            if message == trade:
+                stop_event.set()
+
+        await collector.run(handler, stop_event)
+
+        self.assertEqual(received, [rejected, ack, trade])
+        self.assertEqual(len(factory.contexts), 2)
+        sent = []
+        for context in factory.contexts:
+            assert context.websocket is not None
+            sent.append(json.loads(context.websocket.sent[0]))
+        self.assertEqual(sent[0]["params"], sent[1]["params"])
+
+    async def test_reconnects_after_subscription_timeout(self) -> None:
+        ack = '{"result":null,"id":1}'
+        trade = '{"e":"aggTrade","s":"BTCUSDT","a":1}'
+        factory = FakeConnectionFactory([[], [ack, trade]])
+        collector = BinanceCollector(
+            symbols=("BTCUSDT",),
+            subscription_timeout=0.01,
+            connection_factory=factory,
+            reconnect_policy=ReconnectPolicy(delays=(0,)),
+        )
+        stop_event = asyncio.Event()
+        received: list[str | bytes] = []
+
+        def handler(message: str | bytes) -> None:
+            received.append(message)
+            if message == trade:
+                stop_event.set()
+
+        await asyncio.wait_for(collector.run(handler, stop_event), timeout=1)
+
+        self.assertEqual(received, [ack, trade])
+        self.assertEqual(len(factory.contexts), 2)
 
     async def test_stop_event_interrupts_blocked_receive(self) -> None:
         factory = FakeConnectionFactory([[]])

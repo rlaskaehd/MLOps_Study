@@ -11,11 +11,15 @@ from websockets.exceptions import ConnectionClosed
 
 from src.collector.parser import normalize_message
 from src.collector.reconnect import ReconnectPolicy, wait_for_reconnect
-
-
-BINANCE_AGG_TRADE_URL = (
-    "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
+from src.collector.subscriptions import (
+    SubscriptionResponseKind,
+    build_subscribe_request,
+    parse_subscription_response,
 )
+from src.config import DEFAULT_SYMBOLS, normalize_symbols
+
+
+BINANCE_WEBSOCKET_URL = "wss://stream.binance.com:9443/ws"
 
 Message = str | bytes
 MessageHandler = Callable[[Message], None | Awaitable[None]]
@@ -25,18 +29,26 @@ class MessageHandlerError(RuntimeError):
     """수신 이후의 표준화 또는 출력 처리가 실패한 경우."""
 
 
+class SubscriptionError(RuntimeError):
+    """구독 확인에 실패해 현재 연결을 다시 만들어야 하는 경우."""
+
+
 class BinanceCollector:
-    """단일 aggTrade 스트림을 순서대로 수신한다."""
+    """한 연결에서 여러 aggTrade 스트림을 순서대로 수신한다."""
 
     def __init__(
         self,
-        url: str = BINANCE_AGG_TRADE_URL,
+        url: str = BINANCE_WEBSOCKET_URL,
         *,
+        symbols: tuple[str, ...] = DEFAULT_SYMBOLS,
+        subscription_timeout: float = 10.0,
         reconnect_policy: ReconnectPolicy | None = None,
         connection_factory: Callable[..., Any] = connect,
         logger: logging.Logger | None = None,
     ) -> None:
         self.url = url
+        self.symbols = normalize_symbols(symbols)
+        self.subscription_timeout = subscription_timeout
         self.reconnect_policy = reconnect_policy or ReconnectPolicy()
         self._connection_factory = connection_factory
         self._logger = logger or logging.getLogger(__name__)
@@ -57,6 +69,8 @@ class BinanceCollector:
                 raise
             except MessageHandlerError:
                 raise
+            except SubscriptionError as error:
+                self._logger.warning("Binance 스트림 구독에 실패했습니다: %s", error)
             except (ConnectionClosed, OSError, TimeoutError) as error:
                 self._logger.warning(
                     "Binance WebSocket 연결이 종료되었습니다: %s",
@@ -85,14 +99,38 @@ class BinanceCollector:
             max_queue=16,
         ) as websocket:
             self._logger.info("Binance WebSocket에 연결되었습니다.")
+            await websocket.send(build_subscribe_request(self.symbols))
+            subscription_deadline = (
+                asyncio.get_running_loop().time() + self.subscription_timeout
+            )
+            subscription_confirmed = False
 
             while not stop_event.is_set():
-                message = await self._receive_or_stop(websocket, stop_event)
+                timeout = None
+                if not subscription_confirmed:
+                    timeout = max(
+                        0.0,
+                        subscription_deadline - asyncio.get_running_loop().time(),
+                    )
+                message = await self._receive_or_stop(
+                    websocket,
+                    stop_event,
+                    timeout=timeout,
+                )
                 if message is None:
                     return
 
                 await self._handle_message(handler, message)
                 self.reconnect_policy.reset()
+                response = parse_subscription_response(message)
+                if response is not None:
+                    if response.kind is SubscriptionResponseKind.ERROR:
+                        raise SubscriptionError(response.detail or "unknown")
+                    subscription_confirmed = True
+                    self._logger.info(
+                        "%d개 aggTrade 스트림 구독이 확인되었습니다.",
+                        len(self.symbols),
+                    )
 
                 if self._is_server_shutdown(message):
                     self._logger.warning(
@@ -104,6 +142,8 @@ class BinanceCollector:
     async def _receive_or_stop(
         websocket: Any,
         stop_event: asyncio.Event,
+        *,
+        timeout: float | None = None,
     ) -> Message | None:
         receive_task = asyncio.create_task(websocket.recv())
         stop_task = asyncio.create_task(stop_event.wait())
@@ -112,7 +152,13 @@ class BinanceCollector:
             completed, _ = await asyncio.wait(
                 {receive_task, stop_task},
                 return_when=asyncio.FIRST_COMPLETED,
+                timeout=timeout,
             )
+
+            if not completed:
+                receive_task.cancel()
+                await asyncio.gather(receive_task, return_exceptions=True)
+                raise SubscriptionError("구독 확인 응답 시간이 초과되었습니다.")
 
             # 동시에 완료되었다면 이미 수신된 메시지를 먼저 보존한다.
             if receive_task in completed:

@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import inspect
 import io
 import json
 import logging
@@ -86,7 +87,9 @@ class FakeCollectorRunner:
 
     async def run(self, handler: Any, stop_event: asyncio.Event) -> None:
         for message in self._messages:
-            handler(message)
+            result = handler(message)
+            if inspect.isawaitable(result):
+                await result
         stop_event.set()
 
 
@@ -187,8 +190,8 @@ class NormalizeMessageTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(result.event["raw_message"]), message)
 
 
-class StdoutOutputTests(unittest.TestCase):
-    def test_writes_one_compact_json_object_per_line_and_flushes(self) -> None:
+class StdoutOutputTests(unittest.IsolatedAsyncioTestCase):
+    async def test_writes_one_compact_json_object_per_line_and_flushes(self) -> None:
         stream = RecordingStream()
         output = StdoutOutput(stream)
         events = [
@@ -196,8 +199,10 @@ class StdoutOutputTests(unittest.TestCase):
             {"symbol": "BTCUSDT", "quantity": "0.10"},
         ]
 
+        await output.open()
         for event in events:
-            output.write(event)
+            await output.write(event)
+        await output.close()
 
         lines = stream.getvalue().splitlines()
         self.assertEqual(len(lines), 2)
@@ -388,7 +393,7 @@ class MainIntegrationTests(unittest.IsolatedAsyncioTestCase):
         logger.addHandler(logging.StreamHandler(stream))
         return logger
 
-    def test_handler_writes_data_to_stdout_and_warning_to_logger(self) -> None:
+    async def test_handler_writes_data_to_stdout_and_warning_to_logger(self) -> None:
         stdout = RecordingStream()
         stderr = io.StringIO()
         handler = create_message_handler(
@@ -396,9 +401,9 @@ class MainIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.make_logger(stderr),
         )
 
-        handler('{"e":"aggTrade","p":"1.00"}')
+        await handler('{"e":"aggTrade","p":"1.00"}')
         invalid_message = '{"e":"aggTrade"'
-        handler(invalid_message)
+        await handler(invalid_message)
 
         output_events = [
             json.loads(line) for line in stdout.getvalue().splitlines()

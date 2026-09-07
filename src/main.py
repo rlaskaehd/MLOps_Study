@@ -4,12 +4,14 @@ import asyncio
 import logging
 import signal
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 
 from src.collector.client import BinanceCollector, Message, MessageHandlerError
-from src.collector.parser import normalize_message
 from src.config import DEFAULT_SYMBOLS, parse_args
+from src.monitoring.stats import StatsCollector
+from src.outputs.base import EventOutput
 from src.outputs.stdout import StdoutOutput
+from src.pipeline import EventDispatcher
 
 
 LOGGER = logging.getLogger("binance_collector")
@@ -26,21 +28,21 @@ def configure_logging() -> None:
 
 
 def create_message_handler(
-    output: StdoutOutput,
+    output: EventOutput,
     logger: logging.Logger,
-) -> Callable[[Message], None]:
-    """수신 메시지를 표준화하고 한 줄의 JSON으로 출력한다."""
+    stats: StatsCollector | None = None,
+) -> Callable[[Message], Awaitable[None]]:
+    """기존 호출 지점을 공통 EventDispatcher 경로에 연결한다."""
 
-    def handle(message: Message) -> None:
-        normalized = normalize_message(message)
-        output.write(normalized.event)
-        if normalized.warning is not None:
-            logger.warning(
-                "메시지를 raw_message로 보존했습니다: %s",
-                normalized.warning,
-            )
-
-    return handle
+    active_stats = stats or StatsCollector(
+        DEFAULT_SYMBOLS,
+        output_connected=True,
+    )
+    return EventDispatcher(
+        output=output,
+        stats=active_stats,
+        logger=logger,
+    ).handle
 
 
 def install_signal_handlers(stop_event: asyncio.Event) -> list[signal.Signals]:
@@ -69,7 +71,8 @@ async def run_collector(
     *,
     symbols: Sequence[str] = DEFAULT_SYMBOLS,
     collector: BinanceCollector | None = None,
-    output: StdoutOutput | None = None,
+    output: EventOutput | None = None,
+    stats: StatsCollector | None = None,
     stop_event: asyncio.Event | None = None,
     logger: logging.Logger = LOGGER,
     manage_signals: bool = True,
@@ -80,19 +83,32 @@ async def run_collector(
         symbols=tuple(symbols),
         logger=logger,
     )
-    active_output = output or StdoutOutput()
+    active_output = output if output is not None else StdoutOutput()
+    active_stats = stats or StatsCollector(
+        symbols,
+        output_connected=True,
+    )
+    dispatcher = EventDispatcher(
+        output=active_output,
+        stats=active_stats,
+        logger=logger,
+    )
     active_stop_event = stop_event or asyncio.Event()
     installed = (
         install_signal_handlers(active_stop_event) if manage_signals else []
     )
 
+    opened = False
     try:
-        await active_collector.run(
-            create_message_handler(active_output, logger),
-            active_stop_event,
-        )
+        await dispatcher.open()
+        opened = True
+        await active_collector.run(dispatcher.handle, active_stop_event)
     finally:
-        remove_signal_handlers(installed)
+        try:
+            if opened:
+                await dispatcher.close()
+        finally:
+            remove_signal_handlers(installed)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

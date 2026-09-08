@@ -11,9 +11,12 @@ from src.outputs.mongodb import MongoBatchOutput, MongoBatchWriteError
 class FakeAdmin:
     def __init__(self) -> None:
         self.commands: list[str] = []
+        self.error: Exception | None = None
 
     async def command(self, name: str) -> dict[str, int]:
         self.commands.append(name)
+        if self.error is not None:
+            raise self.error
         return {"ok": 1}
 
 
@@ -83,6 +86,7 @@ class MongoBatchOutputTests(unittest.IsolatedAsyncioTestCase):
         collection: FakeCollection | None = None,
         flush_interval: float = 0.02,
         queue_maxsize: int = 10,
+        shutdown_timeout: float = 1,
         on_batch_persisted: Any = None,
         on_state_changed: Any = None,
     ) -> tuple[MongoBatchOutput, FakeClient, FakeCollection, FakeClientFactory]:
@@ -94,7 +98,7 @@ class MongoBatchOutputTests(unittest.IsolatedAsyncioTestCase):
             flush_interval=flush_interval,
             queue_maxsize=queue_maxsize,
             operation_timeout=1,
-            shutdown_timeout=1,
+            shutdown_timeout=shutdown_timeout,
             client_factory=factory,
             on_batch_persisted=on_batch_persisted,
             on_state_changed=on_state_changed,
@@ -226,6 +230,60 @@ class MongoBatchOutputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(states[0:2], ["연결 확인 중", "연결됨"])
         self.assertIn("적재 중", states)
         self.assertEqual(states[-1], "종료됨")
+
+    async def test_open_failure_closes_client_without_starting_collection(self) -> None:
+        output, client, collection, _ = self.make_output()
+        client.admin.error = OSError("cannot connect")
+
+        with self.assertRaises(OSError):
+            await output.open()
+
+        self.assertTrue(client.closed)
+        self.assertIsNone(client.requested_database)
+        self.assertEqual(collection.calls, [])
+
+    async def test_failed_batch_never_reports_persistence_success(self) -> None:
+        collection = FakeCollection()
+        collection.error = OSError("write failed")
+        persisted: list[tuple[int, float]] = []
+        states: list[str] = []
+        output, _, _, _ = self.make_output(
+            collection=collection,
+            flush_interval=0.01,
+            on_batch_persisted=lambda count, duration: persisted.append(
+                (count, duration)
+            ),
+            on_state_changed=states.append,
+        )
+        await output.open()
+        await output.write({"sequence": 1})
+
+        with self.assertRaises(MongoBatchWriteError):
+            await asyncio.wait_for(output.wait_failed(), timeout=1)
+
+        self.assertEqual(persisted, [])
+        self.assertEqual(states[-1], "오류")
+        await output.close()
+
+    async def test_shutdown_timeout_closes_client_and_keeps_batch_unconfirmed(
+        self,
+    ) -> None:
+        collection = FakeCollection()
+        collection.release.clear()
+        output, client, _, _ = self.make_output(
+            collection=collection,
+            flush_interval=0.01,
+            shutdown_timeout=0.02,
+        )
+        await output.open()
+        await output.write({"sequence": 1})
+        await asyncio.wait_for(collection.called.wait(), timeout=1)
+
+        with self.assertRaisesRegex(RuntimeError, "제한 시간"):
+            await output.close()
+
+        self.assertTrue(client.closed)
+        self.assertEqual(output.pending_count, 1)
 
 
 if __name__ == "__main__":

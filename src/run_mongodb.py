@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from src.collector.client import BinanceCollector, MessageHandlerError
+from src.collector.client import MessageHandlerError
 from src.config import (
     DEFAULT_SYMBOLS,
     CollectorConfig,
@@ -21,7 +21,6 @@ from src.config import (
 )
 from src.main import configure_logging, run_collector
 from src.monitoring.stats import StatsCollector
-from src.monitoring.tui import TuiRenderer
 from src.outputs.base import EventOutput
 from src.outputs.mongodb import MongoBatchOutput
 from src.pipeline import OutputLifecycleError, OutputWriteError

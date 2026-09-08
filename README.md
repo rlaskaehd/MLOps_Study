@@ -103,6 +103,17 @@ cp .env.example .env
 
 기본 설정은 `studygroup` 데이터베이스의 `binance_events` 컬렉션을 사용한다. 인증을 사용하는 MongoDB라면 `.env`의 `DATALAKE_USER`와 `DATALAKE_PASSWORD`를 함께 채운다. 개인 `.env`는 Git에서 제외된다.
 
+사용자를 적재 대상인 `datalake` 데이터베이스에서 만들었다면 다음처럼 설정한다.
+
+```dotenv
+DATALAKE_DB_NAME="datalake"
+DATALAKE_USER="study_user"
+DATALAKE_PASSWORD="change-me"
+DATALAKE_AUTH_SOURCE="datalake"
+```
+
+`DATALAKE_AUTH_SOURCE`를 비워 두거나 생략하면 `DATALAKE_DB_NAME`을 인증 DB로 사용하므로 위 예시에서는 자동으로 `datalake`가 적용된다. 사용자를 `admin` 데이터베이스에서 만들고 `datalake`에 `readWrite` 권한을 부여했다면 `DATALAKE_AUTH_SOURCE="admin"`으로 지정한다. `readWrite`는 인증 후 사용할 수 있는 데이터 권한이고, `DATALAKE_AUTH_SOURCE`는 사용자를 찾을 인증 DB다.
+
 TUI와 MongoDB 적재를 함께 시작한다.
 
 ```bash

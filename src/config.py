@@ -53,17 +53,23 @@ class MongoConfig:
     port: int
     username: str | None
     password: str | None
+    auth_source: str | None
     database: str
     collection: str
 
     @property
     def uri(self) -> str:
-        credentials = ""
-        if self.username is not None and self.password is not None:
-            credentials = (
-                f"{quote_plus(self.username)}:{quote_plus(self.password)}@"
-            )
-        return f"mongodb://{credentials}{self.host}:{self.port}"
+        if self.username is None or self.password is None:
+            return f"mongodb://{self.host}:{self.port}"
+
+        credentials = (
+            f"{quote_plus(self.username)}:{quote_plus(self.password)}@"
+        )
+        auth_source = quote_plus(self.auth_source or self.database)
+        return (
+            f"mongodb://{credentials}{self.host}:{self.port}/"
+            f"?authSource={auth_source}"
+        )
 
 
 class ConfigurationError(ValueError):
@@ -100,6 +106,9 @@ def load_mongo_config(
     ).strip()
     username = _optional_setting(source.get("DATALAKE_USER"))
     password = _optional_setting(source.get("DATALAKE_PASSWORD"))
+    configured_auth_source = _optional_setting(
+        source.get("DATALAKE_AUTH_SOURCE")
+    )
 
     try:
         port = int(port_text)
@@ -118,12 +127,21 @@ def load_mongo_config(
         raise ConfigurationError(
             "DATALAKE_USER와 DATALAKE_PASSWORD는 함께 설정해야 합니다."
         )
+    if username is None:
+        if configured_auth_source is not None:
+            raise ConfigurationError(
+                "DATALAKE_AUTH_SOURCE는 MongoDB 인증정보와 함께 설정해야 합니다."
+            )
+        auth_source = None
+    else:
+        auth_source = configured_auth_source or database
 
     return MongoConfig(
         host=host,
         port=port,
         username=username,
         password=password,
+        auth_source=auth_source,
         database=database,
         collection=collection,
     )

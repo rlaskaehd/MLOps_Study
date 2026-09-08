@@ -8,7 +8,7 @@ import logging
 from src.collector.client import Message
 from src.collector.parser import normalize_message
 from src.monitoring.stats import StatsCollector
-from src.outputs.base import EventOutput
+from src.outputs.base import EventOutput, FailureAwareEventOutput
 
 
 class OutputLifecycleError(RuntimeError):
@@ -77,3 +77,27 @@ class EventDispatcher:
             message = f"후속 출력 정리 실패: {type(error).__name__}"
             self.stats.record_error(message)
             raise OutputLifecycleError(message) from error
+
+    def supports_failure_monitor(self) -> bool:
+        """연결된 출력에 감시할 백그라운드 작업이 있는지 반환한다."""
+
+        return isinstance(self.output, FailureAwareEventOutput)
+
+    async def wait_for_output_failure(self) -> None:
+        """후속 출력의 비동기 실패를 공통 출력 오류로 변환한다."""
+
+        output = self.output
+        if not isinstance(output, FailureAwareEventOutput):
+            raise RuntimeError("실패 감시를 지원하지 않는 출력입니다.")
+        try:
+            await output.wait_failed()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            message = f"후속 출력 비동기 작업 실패: {type(error).__name__}"
+            self.stats.record_error(message)
+            raise OutputWriteError(message) from error
+
+        message = "후속 출력 비동기 작업이 예기치 않게 종료되었습니다."
+        self.stats.record_error(message)
+        raise OutputWriteError(message)

@@ -19,7 +19,7 @@ from src.monitoring.stats import StatsCollector
 from src.monitoring.tui import TuiRenderer
 from src.outputs.base import EventOutput
 from src.outputs.factory import create_output
-from src.pipeline import EventDispatcher
+from src.pipeline import EventDispatcher, OutputWriteError
 
 
 LOGGER = logging.getLogger("binance_collector")
@@ -129,6 +129,7 @@ async def run_collector(
     installed = install_signal_handlers(active_stop_event) if manage_signals else []
 
     opened = False
+    primary_error: BaseException | None = None
     try:
         await dispatcher.open()
         opened = True
@@ -141,14 +142,64 @@ async def run_collector(
                 active_stop_event,
             )
         else:
-            await active_collector.run(dispatcher.handle, active_stop_event)
+            await _run_collector_with_output_monitor(
+                active_collector,
+                dispatcher,
+                active_stop_event,
+            )
+    except BaseException as error:
+        primary_error = error
+        raise
     finally:
         active_stop_event.set()
         try:
             if opened:
-                await dispatcher.close()
+                try:
+                    await dispatcher.close()
+                except BaseException:
+                    if primary_error is None:
+                        raise
+                    logger.exception("후속 출력 정리 중 추가 오류가 발생했습니다.")
         finally:
             remove_signal_handlers(installed)
+
+
+async def _run_collector_with_output_monitor(
+    collector: BinanceCollector,
+    dispatcher: EventDispatcher,
+    stop_event: asyncio.Event,
+) -> None:
+    """수집 중 출력의 백그라운드 실패도 함께 감시한다."""
+
+    collector_task = asyncio.create_task(collector.run(dispatcher.handle, stop_event))
+    failure_task: asyncio.Task[None] | None = None
+    if dispatcher.supports_failure_monitor():
+        failure_task = asyncio.create_task(dispatcher.wait_for_output_failure())
+
+    try:
+        if failure_task is None:
+            await collector_task
+            return
+
+        completed, _ = await asyncio.wait(
+            {collector_task, failure_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if failure_task in completed:
+            stop_event.set()
+            if not collector_task.done():
+                collector_task.cancel()
+            await asyncio.gather(collector_task, return_exceptions=True)
+            await failure_task
+        await collector_task
+    finally:
+        tasks = [collector_task]
+        if failure_task is not None:
+            tasks.append(failure_task)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _run_with_tui(
@@ -165,7 +216,7 @@ async def _run_with_tui(
         # 화면이 준비된 뒤 수집을 시작해 짧은 실행에서도 상태를 한 번 표시한다.
         await asyncio.sleep(0)
         collector_task = asyncio.create_task(
-            collector.run(dispatcher.handle, stop_event)
+            _run_collector_with_output_monitor(collector, dispatcher, stop_event)
         )
         done, _ = await asyncio.wait(
             {collector_task, tui_task},
@@ -230,7 +281,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     except KeyboardInterrupt:
         LOGGER.info("종료 요청을 받아 수집기를 종료했습니다.")
-    except MessageHandlerError:
+    except (MessageHandlerError, OutputWriteError):
         _report_failure(config.mode, "메시지 출력에 실패해 수집기를 종료합니다.")
         return 1
     except Exception:

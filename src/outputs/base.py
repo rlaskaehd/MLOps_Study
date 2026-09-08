@@ -1,6 +1,5 @@
 """후속 적재·소비 계층이 구현할 공통 출력 계약을 정의한다."""
-
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from src.models.event import Event
 
@@ -16,3 +15,11 @@ class EventOutput(Protocol):
 
     async def close(self) -> None:
         """출력 객체가 가진 자원을 정리한다."""
+
+
+@runtime_checkable
+class FailureAwareEventOutput(Protocol):
+    """백그라운드 작업의 실패를 실행 관리자에 알리는 출력 계약."""
+
+    async def wait_failed(self) -> None:
+        """실패 전까지 기다리고 실패 원인을 예외로 전달한다."""

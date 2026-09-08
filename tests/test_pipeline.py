@@ -46,6 +46,25 @@ class GatedOutput(MemoryOutput):
         await super().write(event)
 
 
+class BackgroundFailingOutput(MemoryOutput):
+    def __init__(self) -> None:
+        super().__init__()
+        self.failure = asyncio.Event()
+
+    async def wait_failed(self) -> None:
+        await self.failure.wait()
+        raise OSError("background sink unavailable")
+
+
+class IdleCollector:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def run(self, handler: object, stop_event: asyncio.Event) -> None:
+        self.started.set()
+        await stop_event.wait()
+
+
 class OneMessageCollector:
     def __init__(self, message: str) -> None:
         self.message = message
@@ -191,6 +210,33 @@ class EventDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stats.snapshot().forwarded_messages, 0)
         self.assertIn("후속 출력 전달 실패", stats.snapshot().recent_error or "")
         await dispatcher.close()
+
+    async def test_background_output_failure_stops_idle_collector(self) -> None:
+        output = BackgroundFailingOutput()
+        collector = IdleCollector()
+        stop_event = asyncio.Event()
+        stats = StatsCollector(("BTCUSDT",), output_connected=True)
+
+        task = asyncio.create_task(
+            run_collector(
+                symbols=("BTCUSDT",),
+                mode="json",
+                collector=collector,  # type: ignore[arg-type]
+                output=output,
+                stats=stats,
+                stop_event=stop_event,
+                manage_signals=False,
+            )
+        )
+        await collector.started.wait()
+        output.failure.set()
+
+        with self.assertRaises(OutputWriteError):
+            await asyncio.wait_for(task, timeout=1)
+
+        self.assertTrue(stop_event.is_set())
+        self.assertEqual(output.calls, ["open", "close"])
+        self.assertIn("비동기 작업 실패", stats.snapshot().recent_error or "")
 
     async def test_no_output_still_counts_every_received_message(self) -> None:
         dispatcher, stats = self.make_dispatcher(None)

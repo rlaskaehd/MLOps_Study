@@ -114,6 +114,33 @@ class TuiRenderTests(unittest.TestCase):
         self.assertEqual(stream.getvalue(), "")
         self.assertIn("sample warning", stats.snapshot().recent_error or "")
 
+    def test_renders_mongodb_queue_and_persistence_separately(self) -> None:
+        stats = StatsCollector(
+            ("BTCUSDT",),
+            output_connected=True,
+            storage_name="MongoDB",
+        )
+        stats.record_forwarded()
+        stats.record_forwarded()
+        stats.record_persisted(1, 0.008)
+        stats.set_storage_state("연결됨")
+        stream = io.StringIO()
+        console = Console(
+            file=stream,
+            force_terminal=False,
+            color_system=None,
+            width=140,
+        )
+
+        console.print(TuiRenderer.render(stats.snapshot()))
+        rendered = stream.getvalue()
+
+        self.assertIn("큐 접수: 2", rendered)
+        self.assertIn("MongoDB: 연결됨", rendered)
+        self.assertIn("적재 확인: 1", rendered)
+        self.assertIn("미확인: 1", rendered)
+        self.assertIn("최근 배치: 1건 / 8.0ms", rendered)
+
 
 class TuiIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_tui_and_custom_output_receive_same_events(self) -> None:

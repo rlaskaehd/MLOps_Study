@@ -74,6 +74,7 @@ class TuiRenderer:
         )
 
         output_state = "연결됨" if snapshot.output_connected else "미연결"
+        forwarded_label = "큐 접수" if snapshot.storage_name else "전달 완료"
         status = Table.grid(expand=True)
         status.add_column(ratio=1)
         status.add_row(
@@ -83,12 +84,28 @@ class TuiRenderer:
                         f"연결: {snapshot.connection_state}",
                         f"구독: {snapshot.subscription_state}",
                         f"후속 출력: {output_state}",
-                        f"전달 완료: {snapshot.forwarded_messages:,}",
+                        f"{forwarded_label}: {snapshot.forwarded_messages:,}",
                         f"제어·미분류: {snapshot.control_or_unclassified:,}",
                     )
                 )
             )
         )
+        if snapshot.storage_name is not None:
+            duration = "-"
+            if snapshot.last_batch_duration_ms is not None:
+                duration = f"{snapshot.last_batch_duration_ms:,.1f}ms"
+            status.add_row(
+                Text(
+                    " | ".join(
+                        (
+                            f"{snapshot.storage_name}: {snapshot.storage_state}",
+                            f"적재 확인: {snapshot.persisted_messages:,}",
+                            f"미확인: {snapshot.pending_messages:,}",
+                            f"최근 배치: {snapshot.last_batch_size:,}건 / {duration}",
+                        )
+                    )
+                )
+            )
         if snapshot.recent_error is not None:
             status.add_row(Text(f"최근 오류: {snapshot.recent_error}", style="red"))
 

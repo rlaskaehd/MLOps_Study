@@ -25,6 +25,12 @@ class StatsSnapshot:
     connection_state: str
     subscription_state: str
     recent_error: str | None
+    storage_name: str | None
+    storage_state: str | None
+    persisted_messages: int
+    pending_messages: int
+    last_batch_size: int
+    last_batch_duration_ms: float | None
 
 
 class StatsCollector:
@@ -36,6 +42,7 @@ class StatsCollector:
         *,
         output_connected: bool,
         clock: Callable[[], float] = time.monotonic,
+        storage_name: str | None = None,
     ) -> None:
         self.symbols = normalize_symbols(symbols)
         self._symbol_set = set(self.symbols)
@@ -49,6 +56,11 @@ class StatsCollector:
         self._connection_state = "시작 중"
         self._subscription_state = "구독 대기"
         self._recent_error: str | None = None
+        self._storage_name = storage_name
+        self._storage_state = "연결 대기" if storage_name is not None else None
+        self._persisted_messages = 0
+        self._last_batch_size = 0
+        self._last_batch_duration_ms: float | None = None
 
     def _elapsed(self) -> float:
         return max(0.0, self._clock() - self._started_at)
@@ -87,6 +99,21 @@ class StatsCollector:
         """후속 출력의 write가 성공한 메시지만 계수한다."""
 
         self._forwarded_messages += 1
+
+    def record_persisted(self, count: int, duration_seconds: float) -> None:
+        """MongoDB가 성공으로 응답한 배치만 적재 완료로 계수한다."""
+
+        if count < 0:
+            raise ValueError("적재 완료 건수는 음수일 수 없습니다.")
+        if duration_seconds < 0:
+            raise ValueError("적재 소요 시간은 음수일 수 없습니다.")
+        self._persisted_messages += count
+        self._last_batch_size = count
+        self._last_batch_duration_ms = duration_seconds * 1000
+
+    def set_storage_state(self, state: str) -> None:
+        if self._storage_name is not None:
+            self._storage_state = state
 
     def set_output_connected(self, connected: bool) -> None:
         self._output_connected = connected
@@ -130,4 +157,13 @@ class StatsCollector:
             connection_state=self._connection_state,
             subscription_state=self._subscription_state,
             recent_error=self._recent_error,
+            storage_name=self._storage_name,
+            storage_state=self._storage_state,
+            persisted_messages=self._persisted_messages,
+            pending_messages=max(
+                0,
+                self._forwarded_messages - self._persisted_messages,
+            ),
+            last_batch_size=self._last_batch_size,
+            last_batch_duration_ms=self._last_batch_duration_ms,
         )

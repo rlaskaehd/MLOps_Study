@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
@@ -40,6 +41,8 @@ class MongoBatchOutput(EventOutput):
         operation_timeout: float = 5.0,
         shutdown_timeout: float = 10.0,
         client_factory: Callable[..., Any] = AsyncMongoClient,
+        on_batch_persisted: Callable[[int, float], None] | None = None,
+        on_state_changed: Callable[[str], None] | None = None,
     ) -> None:
         if flush_interval <= 0:
             raise ValueError("flush_interval은 0보다 커야 합니다.")
@@ -58,6 +61,8 @@ class MongoBatchOutput(EventOutput):
         self.operation_timeout = operation_timeout
         self.shutdown_timeout = shutdown_timeout
         self._client_factory = client_factory
+        self._on_batch_persisted = on_batch_persisted
+        self._on_state_changed = on_state_changed
         self._queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=queue_maxsize)
         self._close_requested = asyncio.Event()
         self._failure_event = asyncio.Event()
@@ -81,6 +86,7 @@ class MongoBatchOutput(EventOutput):
         if self._state != "new":
             raise MongoOutputStateError("MongoDB 출력은 한 번만 열 수 있습니다.")
 
+        self._set_state("연결 확인 중")
         timeout_ms = max(1, int(self.operation_timeout * 1000))
         client = self._client_factory(
             self.config.uri,
@@ -97,6 +103,7 @@ class MongoBatchOutput(EventOutput):
             )
             self._collection = client[self.config.database][self.config.collection]
         except BaseException:
+            self._set_state("연결 실패")
             with suppress(Exception):
                 await asyncio.wait_for(
                     client.close(),
@@ -107,6 +114,7 @@ class MongoBatchOutput(EventOutput):
             raise
 
         self._state = "open"
+        self._set_state("연결됨")
         self._worker_task = asyncio.create_task(
             self._run_worker(),
             name="mongodb-batch-output",
@@ -160,6 +168,7 @@ class MongoBatchOutput(EventOutput):
             return
 
         self._state = "closing"
+        self._set_state("종료 중")
         self._close_requested.set()
         worker = self._worker_task
         shutdown_error: Exception | None = None
@@ -188,11 +197,15 @@ class MongoBatchOutput(EventOutput):
         self._state = "closed"
 
         if self._worker_error is not None and not self._failure_reported:
+            self._set_state("오류")
             self._raise_worker_error()
         if shutdown_error is not None:
+            self._set_state("오류")
             raise shutdown_error
         if close_error is not None:
+            self._set_state("오류")
             raise MongoOutputError("MongoDB 연결 정리에 실패했습니다.") from close_error
+        self._set_state("종료됨")
 
     async def _run_worker(self) -> None:
         loop = asyncio.get_running_loop()
@@ -225,6 +238,7 @@ class MongoBatchOutput(EventOutput):
             raise
         except Exception as error:
             self._worker_error = error
+            self._set_state("오류")
             self._failure_event.set()
 
     def _drain_batch(self) -> list[Event]:
@@ -242,16 +256,26 @@ class MongoBatchOutput(EventOutput):
             raise MongoOutputStateError("MongoDB 컬렉션이 준비되지 않았습니다.")
 
         self._inflight_batch = batch
+        self._set_state("적재 중")
+        started_at = time.monotonic()
         await asyncio.wait_for(
             collection.insert_many(batch, ordered=True),
             timeout=self.operation_timeout,
         )
+        duration = time.monotonic() - started_at
         self._inflight_batch = []
         for _ in batch:
             self._queue.task_done()
+        if self._on_batch_persisted is not None:
+            self._on_batch_persisted(len(batch), duration)
+        self._set_state("연결됨")
 
     def _raise_worker_error(self) -> None:
         if self._worker_error is not None:
             raise MongoBatchWriteError(
                 "MongoDB 배치의 저장 성공 여부를 확인할 수 없습니다."
             ) from self._worker_error
+
+    def _set_state(self, state: str) -> None:
+        if self._on_state_changed is not None:
+            self._on_state_changed(state)

@@ -83,6 +83,8 @@ class MongoBatchOutputTests(unittest.IsolatedAsyncioTestCase):
         collection: FakeCollection | None = None,
         flush_interval: float = 0.02,
         queue_maxsize: int = 10,
+        on_batch_persisted: Any = None,
+        on_state_changed: Any = None,
     ) -> tuple[MongoBatchOutput, FakeClient, FakeCollection, FakeClientFactory]:
         active_collection = collection or FakeCollection()
         client = FakeClient(active_collection)
@@ -94,6 +96,8 @@ class MongoBatchOutputTests(unittest.IsolatedAsyncioTestCase):
             operation_timeout=1,
             shutdown_timeout=1,
             client_factory=factory,
+            on_batch_persisted=on_batch_persisted,
+            on_state_changed=on_state_changed,
         )
         return output, client, active_collection, factory
 
@@ -198,6 +202,30 @@ class MongoBatchOutputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output.pending_count, 1)
         await output.close()
         self.assertTrue(client.closed)
+
+    async def test_reports_confirmed_batch_and_storage_states(self) -> None:
+        persisted: list[tuple[int, float]] = []
+        states: list[str] = []
+        output, _, collection, _ = self.make_output(
+            flush_interval=0.01,
+            on_batch_persisted=lambda count, duration: persisted.append(
+                (count, duration)
+            ),
+            on_state_changed=states.append,
+        )
+
+        await output.open()
+        await output.write({"sequence": 1})
+        await output.write({"sequence": 2})
+        await asyncio.wait_for(collection.called.wait(), timeout=1)
+        await output.close()
+
+        self.assertEqual(len(persisted), 1)
+        self.assertEqual(persisted[0][0], 2)
+        self.assertGreaterEqual(persisted[0][1], 0)
+        self.assertEqual(states[0:2], ["연결 확인 중", "연결됨"])
+        self.assertIn("적재 중", states)
+        self.assertEqual(states[-1], "종료됨")
 
 
 if __name__ == "__main__":

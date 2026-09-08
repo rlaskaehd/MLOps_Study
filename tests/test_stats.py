@@ -80,6 +80,27 @@ class StatsCollectorTests(unittest.TestCase):
         self.assertEqual(snapshot.subscription_state, "구독 확인")
         self.assertEqual(snapshot.recent_error, "sample error")
 
+    def test_separates_queue_acceptance_from_confirmed_persistence(self) -> None:
+        stats = StatsCollector(
+            ("BTCUSDT",),
+            output_connected=True,
+            storage_name="MongoDB",
+        )
+        for _ in range(3):
+            stats.record_forwarded()
+        stats.record_persisted(2, 0.0125)
+        stats.set_storage_state("적재 중")
+
+        snapshot = stats.snapshot()
+
+        self.assertEqual(snapshot.storage_name, "MongoDB")
+        self.assertEqual(snapshot.storage_state, "적재 중")
+        self.assertEqual(snapshot.forwarded_messages, 3)
+        self.assertEqual(snapshot.persisted_messages, 2)
+        self.assertEqual(snapshot.pending_messages, 1)
+        self.assertEqual(snapshot.last_batch_size, 2)
+        self.assertEqual(snapshot.last_batch_duration_ms, 12.5)
+
 
 if __name__ == "__main__":
     unittest.main()

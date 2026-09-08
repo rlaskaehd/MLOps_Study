@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TextIO
+from urllib.parse import quote_plus
+
+from dotenv import load_dotenv
 
 
 DEFAULT_SYMBOLS = (
@@ -22,6 +27,12 @@ DEFAULT_SYMBOLS = (
     "LTCUSDT",
 )
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_MONGODB_HOST = "localhost"
+DEFAULT_MONGODB_PORT = 27017
+DEFAULT_MONGODB_DATABASE = "studygroup"
+DEFAULT_MONGODB_COLLECTION = "binance_events"
+
 _SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]+$")
 
 
@@ -34,8 +45,88 @@ class CollectorConfig:
     output: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class MongoConfig:
+    """로컬 MongoDB 출력에 필요한 연결 위치를 보관한다."""
+
+    host: str
+    port: int
+    username: str | None
+    password: str | None
+    database: str
+    collection: str
+
+    @property
+    def uri(self) -> str:
+        credentials = ""
+        if self.username is not None and self.password is not None:
+            credentials = (
+                f"{quote_plus(self.username)}:{quote_plus(self.password)}@"
+            )
+        return f"mongodb://{credentials}{self.host}:{self.port}"
+
+
 class ConfigurationError(ValueError):
-    """터미널 스트림과 실행 모드의 조합이 안전하지 않은 경우."""
+    """프로그램을 안전하게 시작할 수 없는 설정인 경우."""
+
+
+def _optional_setting(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def load_mongo_config(
+    *,
+    environ: Mapping[str, str] | None = None,
+    env_file: Path | None = None,
+) -> MongoConfig:
+    """프로젝트 루트의 .env와 환경 변수에서 MongoDB 설정을 읽는다."""
+
+    if environ is None:
+        load_dotenv(env_file or PROJECT_ROOT / ".env", override=False)
+        source: Mapping[str, str] = os.environ
+    else:
+        source = environ
+
+    host = (source.get("DATALAKE_HOST") or DEFAULT_MONGODB_HOST).strip()
+    port_text = (source.get("DATALAKE_PORT") or str(DEFAULT_MONGODB_PORT)).strip()
+    database = (
+        source.get("DATALAKE_DB_NAME") or DEFAULT_MONGODB_DATABASE
+    ).strip()
+    collection = (
+        source.get("DATALAKE_COLLECTION_NAME") or DEFAULT_MONGODB_COLLECTION
+    ).strip()
+    username = _optional_setting(source.get("DATALAKE_USER"))
+    password = _optional_setting(source.get("DATALAKE_PASSWORD"))
+
+    try:
+        port = int(port_text)
+    except ValueError as error:
+        raise ConfigurationError("DATALAKE_PORT는 정수여야 합니다.") from error
+
+    if not host:
+        raise ConfigurationError("DATALAKE_HOST는 비어 있을 수 없습니다.")
+    if not 1 <= port <= 65535:
+        raise ConfigurationError("DATALAKE_PORT는 1~65535 범위여야 합니다.")
+    if not database:
+        raise ConfigurationError("DATALAKE_DB_NAME은 비어 있을 수 없습니다.")
+    if not collection:
+        raise ConfigurationError("DATALAKE_COLLECTION_NAME은 비어 있을 수 없습니다.")
+    if (username is None) != (password is None):
+        raise ConfigurationError(
+            "DATALAKE_USER와 DATALAKE_PASSWORD는 함께 설정해야 합니다."
+        )
+
+    return MongoConfig(
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        database=database,
+        collection=collection,
+    )
 
 
 def normalize_symbols(values: Sequence[str]) -> tuple[str, ...]:

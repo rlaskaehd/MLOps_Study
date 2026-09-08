@@ -294,3 +294,22 @@ TUI 모드의 운영 로그는 고정 상태 영역에 반영한다. 원본 이�
 버전 관리는 각 Phase 검증 후 명시적인 파일 목록을 스테이징하고 `git diff --cached --check`를 통과한 뒤 독립 커밋을 만드는 방식으로 진행한다. 실제 커밋 경계는 Phase 4 다중 구독 `45d9102`, Phase 5 출력 연결과 통계 `a1db0bf`, Phase 6 TUI와 통합 검증이다.
 
 Phase 6 완료 시 새 Python 3.12.13 가상환경에서 고정 의존성 설치와 `pip check`, 자동화 테스트 47개를 통과했다. 실제 Binance 연결에서는 기본 10개 심볼을 65초 이상 수집해 모든 심볼의 수신을 확인했고, TUI와 사용자 정의 메모리 출력 객체를 함께 실행해 거래 이벤트 1,297건과 구독 응답 1건이 모두 전달됨을 확인했다. 후속 출력 없는 TUI 단독 실행도 Ctrl+C로 종료 코드 0과 화면 복원을 확인했다. 세부 심볼별 결과와 미검증 운영체제는 `README.md`에 기록한다.
+
+## Phase 7–10: 로컬 MongoDB 1초 배치 적재
+
+표준 이벤트를 전처리하지 않고 로컬 MongoDB에 저장한다. `EventDispatcher`가 이벤트를 `MongoBatchOutput`의 제한된 큐에 순서대로 전달하고, 별도 작업이 1초마다 큐를 비워 `insert_many()`를 호출한다. 이벤트 한 건은 MongoDB 문서 한 건으로 유지하며 거래, 구독 응답, 제어·미분류, `raw_message`, 중복 이벤트를 모두 보존한다.
+
+| Phase · Step | 구현 내용 | 산출물 | 완료 기준 |
+|---|---|---|---|
+| Phase 7 · Step 1 | MongoDB 범위와 배치·오류·종료 계약 확정 | `IMPLEMENTATION_PLAN.md` | 1초 주기, 제한 큐, 원본 보존, 적재 확인 기준과 Phase 7–10 경계가 명시됨 |
+| Phase 7 · Step 2 | 프로젝트 루트 `.env` 설정과 고정 의존성 구성 | `src/config.py`, `.env.example`, `.gitignore`, `requirements.txt`, `tests/test_mongodb_config.py` | 기본 로컬 설정, 인증 설정, 잘못된 포트·인증 조합을 검증하고 개인 `.env`가 Git에서 제외됨 |
+| Phase 8 · Step 1 | 비동기 제한 큐와 1초 `insert_many()` 배치 구현 | `src/outputs/mongodb.py`, `tests/test_mongodb_output.py` | 이벤트 복사본이 한 건당 한 문서로 순서대로 적재되고 빈 구간에는 쓰지 않음 |
+| Phase 8 · Step 2 | 백그라운드 실패 감시와 종료 시 잔여 배치 정리 | `src/outputs/base.py`, `src/pipeline.py`, `src/main.py`, 관련 테스트 | 새 이벤트가 없어도 출력 실패가 전달되고 정상 종료 때 남은 큐를 적재하며 기존 오류를 정리 오류가 가리지 않음 |
+| Phase 9 · Step 1 | 큐 접수와 실제 적재 완료 통계 분리 | `src/monitoring/stats.py`, `src/outputs/mongodb.py`, `tests/test_stats.py` | 큐 접수, 적재 확인, 미확인 건수와 최근 배치 크기·소요 시간이 일관되게 계산됨 |
+| Phase 9 · Step 2 | MongoDB TUI 상태와 전용 실행 진입점 연결 | `src/monitoring/tui.py`, `src/run_mongodb.py`, 관련 테스트 | TUI를 유지하면서 MongoDB 적재가 실행되고 설정·출력 오류가 종료 코드에 반영됨 |
+| Phase 10 · Step 1 | 가짜 컬렉션 및 로컬 MongoDB 통합 검증 | `tests/test_mongodb_output.py`, `tests/test_mongodb_integration.py` | 1초 경계, 빈 구간, 느린 DB, 큐 포화, 오류, 정상 종료, 실제 문서 수를 검증함 |
+| Phase 10 · Step 2 | 설치·실행·조회·검증 기록 문서화 | `README.md`, `docs/MONGODB_VALIDATION.md` | 재현 가능한 실행법과 자동·실제 검증 범위가 기록됨 |
+
+`write()`의 성공은 제한 큐가 이벤트를 접수했다는 뜻이고, `insert_many()`의 성공 응답을 받은 뒤에만 적재 완료로 계수한다. MongoDB 쓰기 결과를 알 수 없는 배치는 자동 재전송하지 않으며 미확인 상태로 남긴 뒤 오류 종료한다. 메모리 큐이므로 프로세스 강제 종료 뒤 복구, 디스크 버퍼, 재처리, 정확히 한 번 전달은 이 확장의 범위에 포함하지 않는다.
+
+정상 종료 순서는 새 수신 중단, 진행 중 이벤트 전달 정리, 큐의 잔여 배치 적재, MongoDB 연결 정리다. 저장 작업은 하나만 실행해 배치 간 순서를 유지한다. 빈 1초 구간에는 데이터베이스 요청을 보내지 않는다.

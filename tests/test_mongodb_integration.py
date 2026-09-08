@@ -37,8 +37,7 @@ class LocalMongoIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_pipeline_preserves_every_document_and_count(self) -> None:
         collection_name = f"binance_events_test_{uuid.uuid4().hex}"
         config = replace(
-            load_mongo_config(environ={}),
-            database="studygroup_integration_test",
+            load_mongo_config(),
             collection=collection_name,
         )
         messages = (

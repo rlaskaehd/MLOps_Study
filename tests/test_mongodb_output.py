@@ -4,7 +4,7 @@ import asyncio
 import unittest
 from typing import Any
 
-from src.config import load_mongo_config
+from src.config import MongoConfig, load_mongo_config
 from src.outputs.mongodb import MongoBatchOutput, MongoBatchWriteError
 
 
@@ -89,12 +89,13 @@ class MongoBatchOutputTests(unittest.IsolatedAsyncioTestCase):
         shutdown_timeout: float = 1,
         on_batch_persisted: Any = None,
         on_state_changed: Any = None,
+        config: MongoConfig | None = None,
     ) -> tuple[MongoBatchOutput, FakeClient, FakeCollection, FakeClientFactory]:
         active_collection = collection or FakeCollection()
         client = FakeClient(active_collection)
         factory = FakeClientFactory(client)
         output = MongoBatchOutput(
-            load_mongo_config(environ={}),
+            config or load_mongo_config(environ={}),
             flush_interval=flush_interval,
             queue_maxsize=queue_maxsize,
             operation_timeout=1,
@@ -104,6 +105,24 @@ class MongoBatchOutputTests(unittest.IsolatedAsyncioTestCase):
             on_state_changed=on_state_changed,
         )
         return output, client, active_collection, factory
+
+    async def test_open_uses_uri_with_configured_auth_source(self) -> None:
+        config = load_mongo_config(
+            environ={
+                "DATALAKE_USER": "study",
+                "DATALAKE_PASSWORD": "secret",
+                "DATALAKE_DB_NAME": "datalake",
+            }
+        )
+        output, _, _, factory = self.make_output(config=config)
+
+        await output.open()
+        await output.close()
+
+        self.assertEqual(
+            factory.uri,
+            "mongodb://study:secret@localhost:27017/?authSource=datalake",
+        )
 
     async def test_batches_events_without_mutating_or_filtering_them(self) -> None:
         output, client, collection, factory = self.make_output()

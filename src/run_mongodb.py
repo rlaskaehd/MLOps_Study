@@ -7,31 +7,57 @@ import asyncio
 import logging
 import sys
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
+from src.collector.product_catalog import ProductCatalogError
+from src.collector.streams import StreamSpec, build_stream_specs
 from src.collector.client import MessageHandlerError
 from src.config import (
     DEFAULT_SYMBOLS,
     CollectorConfig,
     ConfigurationError,
     MongoConfig,
+    MultiStreamConfig,
     load_mongo_config,
     normalize_symbols,
     validate_terminal_config,
 )
 from src.main import configure_logging, run_collector
+from src.monitoring.logging import configure_application_logging
+from src.monitoring.multi_stats import MultiStreamStatsCollector
 from src.monitoring.stats import StatsCollector
+from src.multi_runtime import run_multi_stream_collection
 from src.outputs.base import EventOutput
 from src.outputs.mongodb import MongoBatchOutput
+from src.outputs.mongodb_multi import MongoMultiCollectionOutput
 from src.pipeline import OutputLifecycleError, OutputWriteError
 
 
 LOGGER = logging.getLogger("binance_mongodb_collector")
 
 
-def parse_symbols(argv: Sequence[str] | None = None) -> tuple[str, ...]:
+@dataclass(frozen=True, slots=True)
+class MongoRunnerArguments:
+    profile: str
+    symbols: tuple[str, ...]
+    kline_interval: str
+    depth_speed: str
+    mark_price_speed: str
+    validate_symbols: bool
+
+
+def parse_mongodb_args(
+    argv: Sequence[str] | None = None,
+) -> MongoRunnerArguments:
     parser = argparse.ArgumentParser(
-        description="Binance aggTrade TUI와 로컬 MongoDB 1초 배치 적재",
+        description="Binance 실시간 수집기와 로컬 MongoDB 배치 적재",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=("legacy", "multi-stream"),
+        default="legacy",
+        help="수집 프로필 (기본값: legacy aggTrade)",
     )
     parser.add_argument(
         "--symbols",
@@ -40,11 +66,38 @@ def parse_symbols(argv: Sequence[str] | None = None) -> tuple[str, ...]:
         metavar="SYMBOL",
         help="수집할 심볼 목록 (기본값: 10개 학습용 심볼)",
     )
+    parser.add_argument("--kline-interval", default="1m")
+    parser.add_argument("--depth-speed", default="100ms")
+    parser.add_argument("--mark-price-speed", default="1s")
+    parser.add_argument(
+        "--skip-symbol-validation",
+        action="store_true",
+        help="오프라인 점검에서만 실행 전 상품 목록 확인을 생략",
+    )
     namespace = parser.parse_args(argv)
     try:
-        return normalize_symbols(namespace.symbols)
+        symbols = normalize_symbols(namespace.symbols)
+        stream_config = MultiStreamConfig(
+            symbols=symbols,
+            kline_interval=namespace.kline_interval,
+            depth_speed=namespace.depth_speed,
+            mark_price_speed=namespace.mark_price_speed,
+            validate_symbols=not namespace.skip_symbol_validation,
+        )
     except ValueError as error:
         parser.error(str(error))
+    return MongoRunnerArguments(
+        profile=namespace.profile,
+        symbols=stream_config.symbols,
+        kline_interval=stream_config.kline_interval,
+        depth_speed=stream_config.depth_speed,
+        mark_price_speed=stream_config.mark_price_speed,
+        validate_symbols=stream_config.validate_symbols,
+    )
+
+
+def parse_symbols(argv: Sequence[str] | None = None) -> tuple[str, ...]:
+    return parse_mongodb_args(argv).symbols
 
 
 def build_mongodb_runtime(
@@ -71,12 +124,39 @@ def build_mongodb_runtime(
     return stats, output
 
 
+def build_multi_stream_runtime(
+    config: MultiStreamConfig,
+    mongo_config: MongoConfig,
+    *,
+    output_factory: Callable[..., EventOutput] = MongoMultiCollectionOutput,
+    output_options: dict[str, Any] | None = None,
+) -> tuple[tuple[StreamSpec, ...], MultiStreamStatsCollector, EventOutput]:
+    """다중 스트림 명세와 MongoDB 콜백을 하나의 통계 객체에 연결한다."""
+
+    specs = build_stream_specs(
+        config.symbols,
+        kline_interval=config.kline_interval,
+        depth_speed=config.depth_speed,
+        mark_price_speed=config.mark_price_speed,
+    )
+    stats = MultiStreamStatsCollector(config.symbols)
+    options = dict(output_options or {})
+    output = output_factory(
+        mongo_config,
+        on_batch_persisted=stats.record_batch_persisted,
+        on_state_changed=stats.record_storage_state,
+        on_buffer_changed=stats.record_buffer_changed,
+        **options,
+    )
+    return specs, stats, output
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    symbols = parse_symbols(argv)
+    arguments = parse_mongodb_args(argv)
     try:
         mongo_config = load_mongo_config()
         terminal_config = CollectorConfig(
-            symbols=symbols,
+            symbols=arguments.symbols,
             mode="tui",
             output=None,
         )
@@ -89,19 +169,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"설정 오류: {error}", file=sys.stderr)
         return 2
 
-    stats, output = build_mongodb_runtime(symbols, mongo_config)
-    configure_logging("tui", stats=stats)
-    try:
-        asyncio.run(
-            run_collector(
-                symbols=symbols,
-                mode="tui",
-                output=output,
-                stats=stats,
-            )
+    if arguments.profile == "legacy":
+        stats, output = build_mongodb_runtime(arguments.symbols, mongo_config)
+        configure_logging("tui", stats=stats)
+    else:
+        stream_config = MultiStreamConfig(
+            symbols=arguments.symbols,
+            kline_interval=arguments.kline_interval,
+            depth_speed=arguments.depth_speed,
+            mark_price_speed=arguments.mark_price_speed,
+            validate_symbols=arguments.validate_symbols,
         )
+        specs, stats, output = build_multi_stream_runtime(
+            stream_config,
+            mongo_config,
+        )
+        configure_application_logging("tui", stats=stats)
+    try:
+        if arguments.profile == "legacy":
+            asyncio.run(
+                run_collector(
+                    symbols=arguments.symbols,
+                    mode="tui",
+                    output=output,
+                    stats=stats,
+                )
+            )
+        else:
+            asyncio.run(
+                run_multi_stream_collection(
+                    stream_config,
+                    specs,
+                    output=output,
+                    stats=stats,
+                )
+            )
     except KeyboardInterrupt:
         LOGGER.info("종료 요청을 받아 수집기를 종료했습니다.")
+    except ProductCatalogError as error:
+        print(f"상품 확인 오류: {error}", file=sys.stderr)
+        return 2
     except (MessageHandlerError, OutputWriteError, OutputLifecycleError):
         print("[ERROR] MongoDB 출력 실패로 수집기를 종료합니다.", file=sys.stderr)
         return 1

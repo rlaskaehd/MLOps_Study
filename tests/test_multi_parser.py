@@ -134,7 +134,7 @@ class MultiStreamParserTests(unittest.TestCase):
 
         self.assertEqual(result.warning, "field_name_collision")
         self.assertEqual(result.event["meta"]["stream_type"], "control")
-        self.assertEqual(result.event["data"]["stream"], "btcusdt@bookTicker")
+        self.assertEqual(result.event["data"]["raw_message"], raw)
 
 
 if __name__ == "__main__":

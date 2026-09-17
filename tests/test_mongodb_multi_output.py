@@ -184,6 +184,34 @@ class MongoMultiCollectionOutputTests(unittest.IsolatedAsyncioTestCase):
         await output.close()
         self.assertEqual(output.pending_count, 0)
 
+    async def test_can_use_isolated_physical_collection_names(self) -> None:
+        prefix = "probe_"
+        mapping = {
+            name: f"{prefix}{name}"
+            for name in (
+                "agg_trades",
+                "order_book_depth",
+                "book_tickers",
+                "klines",
+                "mark_prices",
+                "collector_control",
+            )
+        }
+        output, client = self.make_output(
+            collection_name_map=mapping,
+            create_indexes=False,
+        )
+
+        await output.open()
+        await output.write(event("markPrice"))
+        await output.close()
+
+        self.assertIn("probe_mark_prices", client.database.collections)
+        self.assertEqual(
+            len(client.database.collections["probe_mark_prices"].calls),
+            1,
+        )
+
     async def test_partial_bulk_failure_reports_only_confirmed_documents(self) -> None:
         client = FakeClient()
         collection = client.database["agg_trades"]

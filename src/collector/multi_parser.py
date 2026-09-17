@@ -129,10 +129,10 @@ def normalize_received_message(
             FIELD_NAMES_BY_STREAM[spec.stream_type],
         )
     except FieldNameCollisionError:
-        raw = normalize_message(message.payload)
+        raw_event: Event = {"raw_message": message.payload}
         return _control_event(
             message,
-            raw.event,
+            raw_event,
             warning="field_name_collision",
             stream_name=stream_name,
         )

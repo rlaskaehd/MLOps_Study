@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import TextIO
+from typing import Protocol, TextIO
 
-from src.monitoring.stats import StatsCollector
+
+class ErrorRecorder(Protocol):
+    def record_error(self, message: str) -> None: ...
 
 
 class TuiStatusLogHandler(logging.Handler):
     """화면을 밀어내지 않고 최근 경고·오류만 통계 상태에 기록한다."""
 
-    def __init__(self, stats: StatsCollector) -> None:
+    def __init__(self, stats: ErrorRecorder) -> None:
         super().__init__(level=logging.WARNING)
         self._stats = stats
 
@@ -26,7 +28,7 @@ class TuiStatusLogHandler(logging.Handler):
 def configure_application_logging(
     mode: str,
     *,
-    stats: StatsCollector,
+    stats: ErrorRecorder,
     stream: TextIO = sys.stderr,
 ) -> None:
     """TUI 중에는 로그를 화면 상태로, JSON 모드에서는 stderr로 보낸다."""

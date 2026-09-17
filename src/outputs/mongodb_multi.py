@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from bson import BSON
@@ -105,11 +106,13 @@ class MongoMultiCollectionOutput(EventOutput):
         config: MongoConfig,
         *,
         collections: Sequence[str] = DEFAULT_COLLECTIONS,
+        collection_name_map: Mapping[str, str] | None = None,
         flush_interval: float = 1.0,
         buffer_max_documents: int = 10_000,
         buffer_max_bytes: int = 64 * 1024 * 1024,
         batch_max_documents: int = 1_000,
         batch_max_bytes: int = 4 * 1024 * 1024,
+        max_concurrent_writes: int = 3,
         operation_timeout: float = 5.0,
         shutdown_timeout: float = 10.0,
         create_indexes: bool = True,
@@ -124,6 +127,7 @@ class MongoMultiCollectionOutput(EventOutput):
             ("buffer_max_bytes", buffer_max_bytes),
             ("batch_max_documents", batch_max_documents),
             ("batch_max_bytes", batch_max_bytes),
+            ("max_concurrent_writes", max_concurrent_writes),
             ("operation_timeout", operation_timeout),
             ("shutdown_timeout", shutdown_timeout),
         ):
@@ -132,12 +136,27 @@ class MongoMultiCollectionOutput(EventOutput):
         active_collections = tuple(dict.fromkeys(collections))
         if set(DEFAULT_COLLECTIONS) - set(active_collections):
             raise ValueError("다중 스트림의 5개 데이터 컬렉션과 제어 컬렉션이 필요합니다.")
+        configured_names = dict(collection_name_map or {})
+        unknown_names = set(configured_names) - set(active_collections)
+        if unknown_names:
+            raise ValueError(
+                "알 수 없는 논리 컬렉션 이름입니다: " + ", ".join(sorted(unknown_names))
+            )
+        physical_names = {
+            name: configured_names.get(name, name) for name in active_collections
+        }
+        if any(not name.strip() for name in physical_names.values()):
+            raise ValueError("MongoDB 물리 컬렉션 이름은 비어 있을 수 없습니다.")
+        if len(set(physical_names.values())) != len(physical_names):
+            raise ValueError("서로 다른 이벤트 종류가 같은 물리 컬렉션을 사용할 수 없습니다.")
 
         self.config = config
         self.collections = active_collections
+        self.collection_name_map = MappingProxyType(physical_names)
         self.flush_interval = flush_interval
         self.batch_max_documents = min(batch_max_documents, buffer_max_documents)
         self.batch_max_bytes = min(batch_max_bytes, buffer_max_bytes)
+        self.max_concurrent_writes = max_concurrent_writes
         self.operation_timeout = operation_timeout
         self.shutdown_timeout = shutdown_timeout
         self.create_indexes = create_indexes
@@ -146,6 +165,7 @@ class MongoMultiCollectionOutput(EventOutput):
         self._on_state_changed = on_state_changed
         self._on_buffer_changed = on_buffer_changed
         self._budget = BufferBudget(buffer_max_documents, buffer_max_bytes)
+        self._write_semaphore = asyncio.Semaphore(max_concurrent_writes)
         self._queues: dict[str, asyncio.Queue[BufferedDocument]] = {
             name: asyncio.Queue() for name in self.collections
         }
@@ -195,7 +215,8 @@ class MongoMultiCollectionOutput(EventOutput):
             )
             database = client[self.config.database]
             self._mongo_collections = {
-                name: database[name] for name in self.collections
+                name: database[self.collection_name_map[name]]
+                for name in self.collections
             }
             if self.create_indexes:
                 await self._create_query_indexes()
@@ -422,13 +443,14 @@ class MongoMultiCollectionOutput(EventOutput):
         self._set_state(collection, "적재 중")
         started_at = time.monotonic()
         try:
-            await asyncio.wait_for(
-                mongo_collection.insert_many(
-                    [item.event for item in batch],
-                    ordered=True,
-                ),
-                timeout=self.operation_timeout,
-            )
+            async with self._write_semaphore:
+                await asyncio.wait_for(
+                    mongo_collection.insert_many(
+                        [item.event for item in batch],
+                        ordered=True,
+                    ),
+                    timeout=self.operation_timeout,
+                )
         except BulkWriteError as error:
             confirmed = max(0, min(len(batch), int(error.details.get("nInserted", 0))))
             if confirmed:

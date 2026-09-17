@@ -35,6 +35,8 @@ COLLECTION_BY_STREAM: Mapping[StreamType, str] = MappingProxyType(
         StreamType.MARK_PRICE: "mark_prices",
     }
 )
+DATA_COLLECTIONS = tuple(dict.fromkeys(COLLECTION_BY_STREAM.values()))
+DEFAULT_COLLECTIONS = (*DATA_COLLECTIONS, CONTROL_COLLECTION)
 
 
 @dataclass(frozen=True, slots=True)

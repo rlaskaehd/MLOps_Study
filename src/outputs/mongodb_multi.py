@@ -15,17 +15,13 @@ from pymongo import ASCENDING, AsyncMongoClient
 from pymongo.errors import BulkWriteError
 
 from src.collector.streams import (
-    COLLECTION_BY_STREAM,
-    CONTROL_COLLECTION,
+    DATA_COLLECTIONS,
+    DEFAULT_COLLECTIONS,
     collection_for_event_type,
 )
 from src.config import MongoConfig
 from src.models.event import Event
 from src.outputs.base import EventOutput
-
-
-DATA_COLLECTIONS = tuple(dict.fromkeys(COLLECTION_BY_STREAM.values()))
-DEFAULT_COLLECTIONS = (*DATA_COLLECTIONS, CONTROL_COLLECTION)
 
 
 class MultiMongoOutputError(RuntimeError):

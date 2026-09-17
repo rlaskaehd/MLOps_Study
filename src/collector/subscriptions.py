@@ -37,9 +37,24 @@ def build_subscribe_request(
 ) -> str:
     """한 연결에서 여러 스트림을 구독하는 JSON 요청을 만든다."""
 
+    return build_stream_subscribe_request(
+        agg_trade_streams(symbols),
+        request_id=request_id,
+    )
+
+
+def build_stream_subscribe_request(
+    stream_names: Sequence[str],
+    *,
+    request_id: int = SUBSCRIPTION_REQUEST_ID,
+) -> str:
+    """이미 확정된 스트림 이름 목록으로 한 SUBSCRIBE 요청을 만든다."""
+
+    if not stream_names:
+        raise ValueError("구독할 스트림을 한 개 이상 지정해야 합니다.")
     payload = {
         "method": "SUBSCRIBE",
-        "params": list(agg_trade_streams(symbols)),
+        "params": list(stream_names),
         "id": request_id,
     }
     return json.dumps(payload, separators=(",", ":"))

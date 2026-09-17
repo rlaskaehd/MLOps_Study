@@ -14,6 +14,7 @@ from src.run_mongodb import (
     parse_mongodb_args,
     parse_symbols,
 )
+from src.storage_routes import StorageRoute
 
 
 class RecordingMongoOutput:
@@ -45,9 +46,9 @@ class RecordingMultiMongoOutput:
         self,
         config: object,
         *,
-        on_batch_persisted: Callable[[str, int, float], None],
-        on_state_changed: Callable[[str, str], None],
-        on_buffer_changed: Callable[[str, int, int, int, int], None],
+        on_batch_persisted: Callable[[StorageRoute, int, float], None],
+        on_state_changed: Callable[[StorageRoute | str, str], None],
+        on_buffer_changed: Callable[[StorageRoute, int, int, int, int], None],
         **options: Any,
     ) -> None:
         self._on_batch_persisted = on_batch_persisted
@@ -124,16 +125,17 @@ class MongoRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
         assert isinstance(output, RecordingMultiMongoOutput)
 
-        output._on_state_changed("agg_trades", "연결됨")
-        output._on_buffer_changed("agg_trades", 2, 512, 2, 512)
-        output._on_batch_persisted("agg_trades", 1, 0.01)
+        output._on_state_changed(StorageRoute.AGG_TRADE, "연결됨")
+        output._on_buffer_changed(StorageRoute.AGG_TRADE, 2, 512, 2, 512)
+        output._on_batch_persisted(StorageRoute.AGG_TRADE, 1, 0.01)
         snapshot = stats.snapshot()
 
         self.assertEqual(len(specs), 5)
-        self.assertEqual(snapshot.collections["agg_trades"].state, "연결됨")
-        self.assertEqual(snapshot.collections["agg_trades"].pending, 2)
-        self.assertEqual(snapshot.collections["agg_trades"].pending_bytes, 512)
-        self.assertEqual(snapshot.collections["agg_trades"].persisted, 1)
+        route_stats = snapshot.collections[StorageRoute.AGG_TRADE]
+        self.assertEqual(route_stats.state, "연결됨")
+        self.assertEqual(route_stats.pending, 2)
+        self.assertEqual(route_stats.pending_bytes, 512)
+        self.assertEqual(route_stats.persisted, 1)
 
     async def test_runtime_wires_tui_events_and_persistence_stats(self) -> None:
         messages = (

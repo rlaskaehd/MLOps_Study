@@ -3,9 +3,9 @@
 import unittest
 
 from src.collector.streams import (
-    COLLECTION_BY_STREAM,
     CONNECTION_GROUP_BY_KEY,
     Market,
+    ROUTE_BY_STREAM,
     StreamType,
     build_stream_specs,
     group_stream_specs,
@@ -53,7 +53,7 @@ class MultiStreamConfigTests(unittest.TestCase):
             Market.USDM_FUTURES,
         )
         for stream_type, spec in by_type.items():
-            self.assertEqual(spec.collection, COLLECTION_BY_STREAM[stream_type])
+            self.assertEqual(spec.storage_route, ROUTE_BY_STREAM[stream_type])
 
     def test_custom_options_are_validated_without_changing_symbols(self) -> None:
         config = MultiStreamConfig(

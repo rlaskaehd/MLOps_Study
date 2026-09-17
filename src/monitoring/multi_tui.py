@@ -120,12 +120,12 @@ class MultiStreamTuiRenderer:
         collections.add_column("미확인", justify="right")
         collections.add_column("버퍼", justify="right")
         collections.add_column("최근 배치", justify="right")
-        for name, state in snapshot.collections.items():
+        for route, state in snapshot.collections.items():
             duration = "-"
             if state.last_batch_duration_ms is not None:
                 duration = f"{state.last_batch_size:,} / {state.last_batch_duration_ms:,.1f}ms"
             collections.add_row(
-                name,
+                route.value,
                 state.state,
                 f"{state.accepted:,}",
                 f"{state.persisted:,}",

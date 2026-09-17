@@ -8,6 +8,7 @@ from src.collector.streams import build_stream_specs, index_stream_specs
 from src.models.event import Event, ReceivedMessage
 from src.monitoring.multi_stats import MultiStreamStatsCollector
 from src.multi_pipeline import MultiStreamEventDispatcher
+from src.storage_routes import StorageRoute
 
 
 class MemoryOutput:
@@ -68,8 +69,8 @@ class MultiStreamEventDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot.control_or_unclassified, 1)
         self.assertEqual(snapshot.cumulative_by_stream["aggTrade"], 2)
         self.assertEqual(snapshot.forwarded_messages, 3)
-        self.assertEqual(snapshot.collections["agg_trades"].accepted, 2)
-        self.assertEqual(snapshot.collections["collector_control"].accepted, 1)
+        self.assertEqual(snapshot.collections[StorageRoute.AGG_TRADE].accepted, 2)
+        self.assertEqual(snapshot.collections[StorageRoute.CONTROL].accepted, 1)
 
 
 if __name__ == "__main__":

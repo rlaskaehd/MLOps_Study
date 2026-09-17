@@ -9,13 +9,16 @@ from types import MappingProxyType
 
 from src.collector.streams import (
     CONNECTION_GROUP_BY_KEY,
-    DEFAULT_COLLECTIONS,
     StreamType,
-    collection_for_event_type,
 )
 from src.config import normalize_symbols
 from src.models.event import Event
 from src.monitoring.depth import DepthContinuityObserver, DepthGap
+from src.storage_routes import (
+    STORAGE_ROUTES,
+    StorageRoute,
+    storage_route_for_stream_type,
+)
 
 
 STREAM_ORDER = tuple(stream_type.value for stream_type in StreamType)
@@ -50,7 +53,7 @@ class MultiStreamStatsSnapshot:
     forwarded_messages: int
     uptime_seconds: float
     connections: Mapping[str, ConnectionStatsSnapshot]
-    collections: Mapping[str, CollectionStatsSnapshot]
+    collections: Mapping[StorageRoute, CollectionStatsSnapshot]
     latest_latency_ms: Mapping[str, int]
     depth_gap_count: int
     depth_connection_resets: int
@@ -88,7 +91,7 @@ class MultiStreamStatsCollector:
         self._last_connection_ids: dict[str, str] = {}
         self._connection_changes = {group: 0 for group in CONNECTION_GROUP_BY_KEY}
         self._collections = {
-            collection: {
+            route: {
                 "accepted": 0,
                 "persisted": 0,
                 "pending": 0,
@@ -97,7 +100,7 @@ class MultiStreamStatsCollector:
                 "last_batch_size": 0,
                 "last_batch_duration_ms": None,
             }
-            for collection in DEFAULT_COLLECTIONS
+            for route in STORAGE_ROUTES
         }
         self._latest_latency_ms: dict[str, int] = {}
         self._depth = depth_observer or DepthContinuityObserver()
@@ -158,37 +161,37 @@ class MultiStreamStatsCollector:
     def record_forwarded(self, event: Event) -> None:
         meta = event.get("meta")
         stream_type = meta.get("stream_type") if isinstance(meta, dict) else "control"
-        collection = collection_for_event_type(
+        route = storage_route_for_stream_type(
             stream_type if isinstance(stream_type, str) else "control"
         )
         self._forwarded_messages += 1
-        self._collections[collection]["accepted"] += 1
+        self._collections[route]["accepted"] += 1
 
     def record_batch_persisted(
         self,
-        collection: str,
+        route: StorageRoute,
         count: int,
         duration_seconds: float,
     ) -> None:
-        target = self._collections[collection]
+        target = self._collections[route]
         target["persisted"] += count
         target["last_batch_size"] = count
         target["last_batch_duration_ms"] = duration_seconds * 1000
 
     def record_buffer_changed(
         self,
-        collection: str,
+        route: StorageRoute,
         pending: int,
         pending_bytes: int,
         total_pending: int,
         total_bytes: int,
     ) -> None:
         del total_pending, total_bytes
-        target = self._collections[collection]
+        target = self._collections[route]
         target["pending"] = pending
         target["pending_bytes"] = pending_bytes
 
-    def record_storage_state(self, target: str, state: str) -> None:
+    def record_storage_state(self, target: StorageRoute | str, state: str) -> None:
         if target == "MongoDB":
             for collection in self._collections.values():
                 collection["state"] = state
@@ -239,10 +242,10 @@ class MultiStreamStatsCollector:
                 last_data_age_seconds=age,
             )
 
-        collection_snapshots: dict[str, CollectionStatsSnapshot] = {}
-        for name, state in self._collections.items():
+        collection_snapshots: dict[StorageRoute, CollectionStatsSnapshot] = {}
+        for route, state in self._collections.items():
             duration = state["last_batch_duration_ms"]
-            collection_snapshots[name] = CollectionStatsSnapshot(
+            collection_snapshots[route] = CollectionStatsSnapshot(
                 accepted=int(state["accepted"]),
                 persisted=int(state["persisted"]),
                 pending=int(state["pending"]),

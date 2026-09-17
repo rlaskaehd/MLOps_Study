@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from enum import Enum
 from types import MappingProxyType
 
+from src.storage_routes import StorageRoute, storage_route_for_stream_type
+
 
 SCHEMA_VERSION = 2
-CONTROL_COLLECTION = "collector_control"
 
 
 class Market(str, Enum):
@@ -26,17 +27,12 @@ class StreamType(str, Enum):
     MARK_PRICE = "markPrice"
 
 
-COLLECTION_BY_STREAM: Mapping[StreamType, str] = MappingProxyType(
+ROUTE_BY_STREAM: Mapping[StreamType, StorageRoute] = MappingProxyType(
     {
-        StreamType.AGG_TRADE: "agg_trades",
-        StreamType.DEPTH: "order_book_depth",
-        StreamType.BOOK_TICKER: "book_tickers",
-        StreamType.KLINE: "klines",
-        StreamType.MARK_PRICE: "mark_prices",
+        stream_type: storage_route_for_stream_type(stream_type.value)
+        for stream_type in StreamType
     }
 )
-DATA_COLLECTIONS = tuple(dict.fromkeys(COLLECTION_BY_STREAM.values()))
-DEFAULT_COLLECTIONS = (*DATA_COLLECTIONS, CONTROL_COLLECTION)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +81,7 @@ class StreamSpec:
     stream_type: StreamType
     symbol: str
     stream_name: str
-    collection: str
+    storage_route: StorageRoute
     connection_group: str
 
 
@@ -181,7 +177,7 @@ def build_stream_specs(
                             depth_speed=depth_speed,
                             mark_price_speed=mark_price_speed,
                         ),
-                        collection=COLLECTION_BY_STREAM[stream_type],
+                        storage_route=ROUTE_BY_STREAM[stream_type],
                         connection_group=group.key,
                     )
                 )
@@ -209,10 +205,3 @@ def index_stream_specs(
             raise ValueError(f"중복 스트림 명세입니다: {key}")
         index[key] = spec
     return MappingProxyType(index)
-
-
-def collection_for_event_type(stream_type: str) -> str:
-    try:
-        return COLLECTION_BY_STREAM[StreamType(stream_type)]
-    except ValueError:
-        return CONTROL_COLLECTION

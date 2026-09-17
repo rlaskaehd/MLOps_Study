@@ -12,6 +12,7 @@ from src.outputs.mongodb_multi import (
     MongoMultiCollectionOutput,
     MultiMongoBatchWriteError,
 )
+from src.storage_routes import STORAGE_ROUTES, StorageRoute
 
 
 class FakeAdmin:
@@ -104,7 +105,7 @@ class MongoMultiCollectionOutputTests(unittest.IsolatedAsyncioTestCase):
         return output, active_client
 
     async def test_routes_all_streams_and_control_without_mutating_inputs(self) -> None:
-        persisted: list[tuple[str, int]] = []
+        persisted: list[tuple[StorageRoute, int]] = []
         output, client = self.make_output(
             on_batch_persisted=lambda collection, count, duration: persisted.append(
                 (collection, count)
@@ -138,7 +139,7 @@ class MongoMultiCollectionOutputTests(unittest.IsolatedAsyncioTestCase):
             documents, ordered = client.database.collections[name].calls[0]
             self.assertEqual(len(documents), 1)
             self.assertTrue(ordered)
-        self.assertEqual({name for name, count in persisted}, expected)
+        self.assertEqual({route for route, count in persisted}, set(STORAGE_ROUTES))
         self.assertEqual(output.pending_count, 0)
         self.assertTrue(client.closed)
         self.assertNotIn("_id", inputs[0])
@@ -186,17 +187,7 @@ class MongoMultiCollectionOutputTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_can_use_isolated_physical_collection_names(self) -> None:
         prefix = "probe_"
-        mapping = {
-            name: f"{prefix}{name}"
-            for name in (
-                "agg_trades",
-                "order_book_depth",
-                "book_tickers",
-                "klines",
-                "mark_prices",
-                "collector_control",
-            )
-        }
+        mapping = {route: f"{prefix}{route.value}" for route in STORAGE_ROUTES}
         output, client = self.make_output(
             collection_name_map=mapping,
             create_indexes=False,
@@ -206,9 +197,9 @@ class MongoMultiCollectionOutputTests(unittest.IsolatedAsyncioTestCase):
         await output.write(event("markPrice"))
         await output.close()
 
-        self.assertIn("probe_mark_prices", client.database.collections)
+        self.assertIn("probe_mark_price", client.database.collections)
         self.assertEqual(
-            len(client.database.collections["probe_mark_prices"].calls),
+            len(client.database.collections["probe_mark_price"].calls),
             1,
         )
 
@@ -227,7 +218,7 @@ class MongoMultiCollectionOutputTests(unittest.IsolatedAsyncioTestCase):
                 "upserted": [],
             }
         )
-        persisted: list[tuple[str, int]] = []
+        persisted: list[tuple[StorageRoute, int]] = []
         output, _ = self.make_output(
             client=client,
             batch_max_documents=2,
@@ -243,9 +234,9 @@ class MongoMultiCollectionOutputTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(MultiMongoBatchWriteError):
             await asyncio.wait_for(output.wait_failed(), timeout=1)
 
-        self.assertEqual(persisted, [("agg_trades", 1)])
+        self.assertEqual(persisted, [(StorageRoute.AGG_TRADE, 1)])
         self.assertEqual(output.pending_count, 1)
-        self.assertEqual(output.pending_by_collection["agg_trades"], 1)
+        self.assertEqual(output.pending_by_route[StorageRoute.AGG_TRADE], 1)
         await output.close()
         self.assertTrue(client.closed)
 

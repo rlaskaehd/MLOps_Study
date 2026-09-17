@@ -4,6 +4,7 @@ import unittest
 from typing import Any
 
 from src.monitoring.multi_stats import MultiStreamStatsCollector
+from src.storage_routes import StorageRoute
 
 
 class FakeClock:
@@ -59,19 +60,20 @@ class MultiStreamStatsTests(unittest.TestCase):
         stats.record_received(control)
         stats.record_forwarded(trade)
         stats.record_forwarded(control)
-        stats.record_buffer_changed("agg_trades", 1, 240, 2, 400)
-        stats.record_batch_persisted("agg_trades", 1, 0.008)
-        stats.record_storage_state("agg_trades", "연결됨")
+        stats.record_buffer_changed(StorageRoute.AGG_TRADE, 1, 240, 2, 400)
+        stats.record_batch_persisted(StorageRoute.AGG_TRADE, 1, 0.008)
+        stats.record_storage_state(StorageRoute.AGG_TRADE, "연결됨")
         snapshot = stats.snapshot()
 
         self.assertEqual(snapshot.control_or_unclassified, 1)
         self.assertEqual(snapshot.forwarded_messages, 2)
-        self.assertEqual(snapshot.collections["agg_trades"].accepted, 1)
-        self.assertEqual(snapshot.collections["agg_trades"].persisted, 1)
-        self.assertEqual(snapshot.collections["agg_trades"].pending, 1)
-        self.assertEqual(snapshot.collections["agg_trades"].pending_bytes, 240)
-        self.assertEqual(snapshot.collections["agg_trades"].last_batch_duration_ms, 8)
-        self.assertEqual(snapshot.collections["collector_control"].accepted, 1)
+        trade_stats = snapshot.collections[StorageRoute.AGG_TRADE]
+        self.assertEqual(trade_stats.accepted, 1)
+        self.assertEqual(trade_stats.persisted, 1)
+        self.assertEqual(trade_stats.pending, 1)
+        self.assertEqual(trade_stats.pending_bytes, 240)
+        self.assertEqual(trade_stats.last_batch_duration_ms, 8)
+        self.assertEqual(snapshot.collections[StorageRoute.CONTROL].accepted, 1)
 
     def test_depth_observer_reports_gap_without_rejecting_overlap_or_duplicate(self) -> None:
         stats = MultiStreamStatsCollector(("BTCUSDT",))

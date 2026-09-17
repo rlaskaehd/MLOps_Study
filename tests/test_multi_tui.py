@@ -7,6 +7,7 @@ from rich.console import Console
 
 from src.monitoring.multi_stats import MultiStreamStatsCollector
 from src.monitoring.multi_tui import MultiStreamTuiRenderer
+from src.storage_routes import StorageRoute
 
 
 class FakeClock:
@@ -32,12 +33,12 @@ class MultiStreamTuiTests(unittest.TestCase):
         }
         stats.record_received(trade)
         stats.record_forwarded(trade)
-        stats.record_batch_persisted("agg_trades", 1, 0.008)
-        stats.record_buffer_changed("agg_trades", 0, 0, 0, 0)
+        stats.record_batch_persisted(StorageRoute.AGG_TRADE, 1, 0.008)
+        stats.record_buffer_changed(StorageRoute.AGG_TRADE, 0, 0, 0, 0)
         stats.record_connection_status("spot_market", "connection", "연결됨")
         stats.record_connection_status("spot_market", "subscription", "30개 구독 확인")
         stats.record_connection_status("spot_market", "data", "수신 중")
-        stats.record_storage_state("agg_trades", "연결됨")
+        stats.record_storage_state(StorageRoute.AGG_TRADE, "연결됨")
         clock.value = 1.0
         stream = io.StringIO()
         console = Console(
@@ -56,7 +57,7 @@ class MultiStreamTuiTests(unittest.TestCase):
         self.assertIn("markPrice", rendered)
         self.assertIn("spot_market", rendered)
         self.assertIn("30개 구독 확인", rendered)
-        self.assertIn("agg_trades", rendered)
+        self.assertIn("agg_trade", rendered)
         self.assertIn("적재 확인", rendered)
         self.assertIn("100ms", rendered)
 

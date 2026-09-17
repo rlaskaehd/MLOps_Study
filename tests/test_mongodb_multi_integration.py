@@ -7,9 +7,9 @@ from contextlib import suppress
 
 from pymongo import AsyncMongoClient
 
-from src.collector.streams import DEFAULT_COLLECTIONS
 from src.config import load_mongo_config
 from src.outputs.mongodb_multi import MongoMultiCollectionOutput
+from src.storage_routes import STORAGE_ROUTES
 
 
 def event(stream_type: str) -> dict[str, object]:
@@ -35,7 +35,7 @@ class LocalMultiMongoIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_each_event_is_stored_once_in_its_temporary_collection(self) -> None:
         config = load_mongo_config()
         prefix = f"multi_integration_{uuid.uuid4().hex}_"
-        names = {logical: f"{prefix}{logical}" for logical in DEFAULT_COLLECTIONS}
+        names = {route: f"{prefix}{route.value}" for route in STORAGE_ROUTES}
         output = MongoMultiCollectionOutput(
             config,
             collection_name_map=names,
@@ -65,8 +65,8 @@ class LocalMultiMongoIntegrationTests(unittest.IsolatedAsyncioTestCase):
             opened = False
 
             database = inspector[config.database]
-            for logical, physical in names.items():
-                with self.subTest(collection=logical):
+            for route, physical in names.items():
+                with self.subTest(route=route.value):
                     self.assertEqual(
                         await database[physical].count_documents({}),
                         1,

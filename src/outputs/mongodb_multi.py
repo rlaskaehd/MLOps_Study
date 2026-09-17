@@ -15,14 +15,15 @@ from bson import BSON
 from pymongo import ASCENDING, AsyncMongoClient
 from pymongo.errors import BulkWriteError
 
-from src.collector.streams import (
-    DATA_COLLECTIONS,
-    DEFAULT_COLLECTIONS,
-    collection_for_event_type,
-)
 from src.config import MongoConfig
 from src.models.event import Event
 from src.outputs.base import EventOutput
+from src.storage_routes import (
+    DATA_STORAGE_ROUTES,
+    STORAGE_ROUTES,
+    StorageRoute,
+    storage_route_for_stream_type,
+)
 
 
 class MultiMongoOutputError(RuntimeError):
@@ -93,9 +94,21 @@ class BufferBudget:
             self._condition.notify_all()
 
 
-BatchPersistedCallback = Callable[[str, int, float], None]
-StateChangedCallback = Callable[[str, str], None]
-BufferChangedCallback = Callable[[str, int, int, int, int], None]
+DEFAULT_COLLECTION_NAME_BY_ROUTE: Mapping[StorageRoute, str] = MappingProxyType(
+    {
+        StorageRoute.AGG_TRADE: "agg_trades",
+        StorageRoute.ORDER_BOOK_DEPTH: "order_book_depth",
+        StorageRoute.BOOK_TICKER: "book_tickers",
+        StorageRoute.KLINE: "klines",
+        StorageRoute.MARK_PRICE: "mark_prices",
+        StorageRoute.CONTROL: "collector_control",
+    }
+)
+
+
+BatchPersistedCallback = Callable[[StorageRoute, int, float], None]
+StateChangedCallback = Callable[[StorageRoute | str, str], None]
+BufferChangedCallback = Callable[[StorageRoute, int, int, int, int], None]
 
 
 class MongoMultiCollectionOutput(EventOutput):
@@ -105,8 +118,8 @@ class MongoMultiCollectionOutput(EventOutput):
         self,
         config: MongoConfig,
         *,
-        collections: Sequence[str] = DEFAULT_COLLECTIONS,
-        collection_name_map: Mapping[str, str] | None = None,
+        routes: Sequence[StorageRoute] = STORAGE_ROUTES,
+        collection_name_map: Mapping[StorageRoute, str] | None = None,
         flush_interval: float = 1.0,
         buffer_max_documents: int = 10_000,
         buffer_max_bytes: int = 64 * 1024 * 1024,
@@ -133,17 +146,20 @@ class MongoMultiCollectionOutput(EventOutput):
         ):
             if value <= 0:
                 raise ValueError(f"{name}은 0보다 커야 합니다.")
-        active_collections = tuple(dict.fromkeys(collections))
-        if set(DEFAULT_COLLECTIONS) - set(active_collections):
-            raise ValueError("다중 스트림의 5개 데이터 컬렉션과 제어 컬렉션이 필요합니다.")
-        configured_names = dict(collection_name_map or {})
-        unknown_names = set(configured_names) - set(active_collections)
-        if unknown_names:
+        active_routes = tuple(dict.fromkeys(routes))
+        if set(STORAGE_ROUTES) - set(active_routes):
+            raise ValueError("다중 스트림의 5개 데이터 경로와 제어 경로가 필요합니다.")
+        configured_names = dict(DEFAULT_COLLECTION_NAME_BY_ROUTE)
+        provided_names = dict(collection_name_map or {})
+        unknown_routes = set(provided_names) - set(active_routes)
+        if unknown_routes:
             raise ValueError(
-                "알 수 없는 논리 컬렉션 이름입니다: " + ", ".join(sorted(unknown_names))
+                "알 수 없는 논리 저장 경로입니다: "
+                + ", ".join(sorted(route.value for route in unknown_routes))
             )
+        configured_names.update(provided_names)
         physical_names = {
-            name: configured_names.get(name, name) for name in active_collections
+            route: configured_names[route] for route in active_routes
         }
         if any(not name.strip() for name in physical_names.values()):
             raise ValueError("MongoDB 물리 컬렉션 이름은 비어 있을 수 없습니다.")
@@ -151,7 +167,7 @@ class MongoMultiCollectionOutput(EventOutput):
             raise ValueError("서로 다른 이벤트 종류가 같은 물리 컬렉션을 사용할 수 없습니다.")
 
         self.config = config
-        self.collections = active_collections
+        self.routes = active_routes
         self.collection_name_map = MappingProxyType(physical_names)
         self.flush_interval = flush_interval
         self.batch_max_documents = min(batch_max_documents, buffer_max_documents)
@@ -166,20 +182,20 @@ class MongoMultiCollectionOutput(EventOutput):
         self._on_buffer_changed = on_buffer_changed
         self._budget = BufferBudget(buffer_max_documents, buffer_max_bytes)
         self._write_semaphore = asyncio.Semaphore(max_concurrent_writes)
-        self._queues: dict[str, asyncio.Queue[BufferedDocument]] = {
-            name: asyncio.Queue() for name in self.collections
+        self._queues: dict[StorageRoute, asyncio.Queue[BufferedDocument]] = {
+            route: asyncio.Queue() for route in self.routes
         }
-        self._pending_documents = {name: 0 for name in self.collections}
-        self._pending_bytes = {name: 0 for name in self.collections}
-        self._inflight: dict[str, list[BufferedDocument]] = {
-            name: [] for name in self.collections
+        self._pending_documents = {route: 0 for route in self.routes}
+        self._pending_bytes = {route: 0 for route in self.routes}
+        self._inflight: dict[StorageRoute, list[BufferedDocument]] = {
+            route: [] for route in self.routes
         }
         self._close_requested = asyncio.Event()
         self._failure_event = asyncio.Event()
         self._client: Any | None = None
-        self._mongo_collections: dict[str, Any] = {}
-        self._workers: dict[str, asyncio.Task[None]] = {}
-        self._worker_errors: dict[str, Exception] = {}
+        self._mongo_collections: dict[StorageRoute, Any] = {}
+        self._workers: dict[StorageRoute, asyncio.Task[None]] = {}
+        self._worker_errors: dict[StorageRoute, Exception] = {}
         self._failure_reported = False
         self._state = "new"
 
@@ -192,7 +208,7 @@ class MongoMultiCollectionOutput(EventOutput):
         return self._budget.bytes
 
     @property
-    def pending_by_collection(self) -> Mapping[str, int]:
+    def pending_by_route(self) -> Mapping[StorageRoute, int]:
         return dict(self._pending_documents)
 
     async def open(self) -> None:
@@ -215,8 +231,8 @@ class MongoMultiCollectionOutput(EventOutput):
             )
             database = client[self.config.database]
             self._mongo_collections = {
-                name: database[self.collection_name_map[name]]
-                for name in self.collections
+                route: database[self.collection_name_map[route]]
+                for route in self.routes
             }
             if self.create_indexes:
                 await self._create_query_indexes()
@@ -235,11 +251,11 @@ class MongoMultiCollectionOutput(EventOutput):
         self._state = "open"
         self._set_state("MongoDB", "연결됨")
         self._workers = {
-            name: asyncio.create_task(
-                self._run_worker(name),
-                name=f"mongodb-{name}",
+            route: asyncio.create_task(
+                self._run_worker(route),
+                name=f"mongodb-{route.value}",
             )
-            for name in self.collections
+            for route in self.routes
         }
 
     async def _create_query_indexes(self) -> None:
@@ -248,9 +264,9 @@ class MongoMultiCollectionOutput(EventOutput):
             ("data.symbol", ASCENDING),
             ("meta.received_at_ms", ASCENDING),
         ]
-        for name in DATA_COLLECTIONS:
+        for route in DATA_STORAGE_ROUTES:
             await asyncio.wait_for(
-                self._mongo_collections[name].create_index(
+                self._mongo_collections[route].create_index(
                     keys,
                     name="market_symbol_received_at",
                 ),
@@ -267,28 +283,28 @@ class MongoMultiCollectionOutput(EventOutput):
             bson_size = len(BSON.encode(document))
         except Exception as error:
             raise MultiMongoOutputError("이벤트를 BSON으로 직렬화할 수 없습니다.") from error
-        collection = self._route(document)
+        route = self._route(document)
         buffered = BufferedDocument(document, bson_size)
         await self._budget.acquire(bson_size)
         try:
             self._raise_worker_error()
-            self._pending_documents[collection] += 1
-            self._pending_bytes[collection] += bson_size
-            self._queues[collection].put_nowait(buffered)
-            self._report_buffer(collection)
+            self._pending_documents[route] += 1
+            self._pending_bytes[route] += bson_size
+            self._queues[route].put_nowait(buffered)
+            self._report_buffer(route)
         except BaseException:
             await self._budget.release(1, bson_size)
             raise
 
-    def _route(self, event: Event) -> str:
+    def _route(self, event: Event) -> StorageRoute:
         meta = event.get("meta")
         stream_type = meta.get("stream_type") if isinstance(meta, dict) else "control"
-        collection = collection_for_event_type(
+        route = storage_route_for_stream_type(
             stream_type if isinstance(stream_type, str) else "control"
         )
-        if collection not in self._queues:
-            raise MultiMongoOutputError(f"설정되지 않은 컬렉션입니다: {collection}")
-        return collection
+        if route not in self._queues:
+            raise MultiMongoOutputError(f"설정되지 않은 저장 경로입니다: {route.value}")
+        return route
 
     async def wait_failed(self) -> None:
         if self._state == "new":
@@ -349,14 +365,14 @@ class MongoMultiCollectionOutput(EventOutput):
             raise MultiMongoOutputError("MongoDB 연결 정리에 실패했습니다.") from close_error
         self._set_state("MongoDB", "종료됨")
 
-    async def _run_worker(self, collection: str) -> None:
+    async def _run_worker(self, route: StorageRoute) -> None:
         carry: BufferedDocument | None = None
         try:
             while True:
                 first = carry
                 carry = None
                 if first is None:
-                    first = await self._first_document(collection)
+                    first = await self._first_document(route)
                 if first is None:
                     return
 
@@ -365,7 +381,7 @@ class MongoMultiCollectionOutput(EventOutput):
                 deadline = asyncio.get_running_loop().time() + self.flush_interval
                 while len(batch) < self.batch_max_documents:
                     candidate = await self._next_batch_document(
-                        collection,
+                        route,
                         deadline=deadline,
                     )
                     if candidate is None:
@@ -378,17 +394,17 @@ class MongoMultiCollectionOutput(EventOutput):
                     if batch_bytes >= self.batch_max_bytes:
                         break
 
-                await self._persist_batch(collection, batch)
+                await self._persist_batch(route, batch)
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            self._worker_errors[collection] = error
-            self._set_state(collection, "오류")
+            self._worker_errors[route] = error
+            self._set_state(route, "오류")
             self._failure_event.set()
             await self._budget.mark_failed()
 
-    async def _first_document(self, collection: str) -> BufferedDocument | None:
-        queue = self._queues[collection]
+    async def _first_document(self, route: StorageRoute) -> BufferedDocument | None:
+        queue = self._queues[route]
         if not queue.empty():
             return queue.get_nowait()
         if self._close_requested.is_set():
@@ -414,11 +430,11 @@ class MongoMultiCollectionOutput(EventOutput):
 
     async def _next_batch_document(
         self,
-        collection: str,
+        route: StorageRoute,
         *,
         deadline: float,
     ) -> BufferedDocument | None:
-        queue = self._queues[collection]
+        queue = self._queues[route]
         if not queue.empty():
             return queue.get_nowait()
         if self._close_requested.is_set():
@@ -433,14 +449,14 @@ class MongoMultiCollectionOutput(EventOutput):
 
     async def _persist_batch(
         self,
-        collection: str,
+        route: StorageRoute,
         batch: list[BufferedDocument],
     ) -> None:
-        mongo_collection = self._mongo_collections.get(collection)
+        mongo_collection = self._mongo_collections.get(route)
         if mongo_collection is None:
-            raise MultiMongoStateError(f"{collection} 컬렉션이 준비되지 않았습니다.")
-        self._inflight[collection] = batch
-        self._set_state(collection, "적재 중")
+            raise MultiMongoStateError(f"{route.value} 저장 경로가 준비되지 않았습니다.")
+        self._inflight[route] = batch
+        self._set_state(route, "적재 중")
         started_at = time.monotonic()
         try:
             async with self._write_semaphore:
@@ -455,52 +471,52 @@ class MongoMultiCollectionOutput(EventOutput):
             confirmed = max(0, min(len(batch), int(error.details.get("nInserted", 0))))
             if confirmed:
                 await self._confirm_batch(
-                    collection,
+                    route,
                     batch[:confirmed],
                     time.monotonic() - started_at,
                 )
-            self._inflight[collection] = batch[confirmed:]
+            self._inflight[route] = batch[confirmed:]
             raise
 
         duration = time.monotonic() - started_at
-        await self._confirm_batch(collection, batch, duration)
-        self._inflight[collection] = []
-        self._set_state(collection, "연결됨")
+        await self._confirm_batch(route, batch, duration)
+        self._inflight[route] = []
+        self._set_state(route, "연결됨")
 
     async def _confirm_batch(
         self,
-        collection: str,
+        route: StorageRoute,
         confirmed: list[BufferedDocument],
         duration: float,
     ) -> None:
         count = len(confirmed)
         byte_count = sum(item.bson_size for item in confirmed)
-        self._pending_documents[collection] -= count
-        self._pending_bytes[collection] -= byte_count
+        self._pending_documents[route] -= count
+        self._pending_bytes[route] -= byte_count
         for _ in confirmed:
-            self._queues[collection].task_done()
+            self._queues[route].task_done()
         await self._budget.release(count, byte_count)
         if self._on_batch_persisted is not None:
-            self._on_batch_persisted(collection, count, duration)
-        self._report_buffer(collection)
+            self._on_batch_persisted(route, count, duration)
+        self._report_buffer(route)
 
     def _raise_worker_error(self) -> None:
         if self._worker_errors:
-            collection, error = next(iter(self._worker_errors.items()))
+            route, error = next(iter(self._worker_errors.items()))
             raise MultiMongoBatchWriteError(
-                f"{collection} 배치의 저장 성공 여부를 모두 확인할 수 없습니다."
+                f"{route.value} 배치의 저장 성공 여부를 모두 확인할 수 없습니다."
             ) from error
 
-    def _set_state(self, target: str, state: str) -> None:
+    def _set_state(self, target: StorageRoute | str, state: str) -> None:
         if self._on_state_changed is not None:
             self._on_state_changed(target, state)
 
-    def _report_buffer(self, collection: str) -> None:
+    def _report_buffer(self, route: StorageRoute) -> None:
         if self._on_buffer_changed is not None:
             self._on_buffer_changed(
-                collection,
-                self._pending_documents[collection],
-                self._pending_bytes[collection],
+                route,
+                self._pending_documents[route],
+                self._pending_bytes[route],
                 self._budget.documents,
                 self._budget.bytes,
             )

@@ -2,6 +2,7 @@
 
 import base64
 import json
+from collections.abc import Mapping
 from typing import Any
 
 from src.models.event import NormalizedMessage
@@ -62,14 +63,23 @@ def _raw_binary_message(message: bytes) -> NormalizedMessage:
     )
 
 
-def _rename_fields(payload: dict[str, Any]) -> dict[str, Any]:
+def rename_fields(
+    payload: Mapping[str, Any],
+    field_names: Mapping[str, str],
+) -> dict[str, Any]:
+    """값과 순서를 유지하면서 지정된 최상위 필드 이름만 바꾼다."""
+
     normalized: dict[str, Any] = {}
     for original_name, value in payload.items():
-        normalized_name = FIELD_NAMES.get(original_name, original_name)
+        normalized_name = field_names.get(original_name, original_name)
         if normalized_name in normalized:
             raise FieldNameCollisionError(normalized_name)
         normalized[normalized_name] = value
     return normalized
+
+
+def _rename_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    return rename_fields(payload, FIELD_NAMES)
 
 
 def normalize_message(message: str | bytes) -> NormalizedMessage:

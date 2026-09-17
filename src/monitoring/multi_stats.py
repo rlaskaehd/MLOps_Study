@@ -35,6 +35,7 @@ class ConnectionStatsSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class CollectionStatsSnapshot:
+    collection_name: str
     accepted: int
     persisted: int
     pending: int
@@ -70,6 +71,7 @@ class MultiStreamStatsCollector:
         *,
         clock: Callable[[], float] = time.monotonic,
         depth_observer: DepthContinuityObserver | None = None,
+        collection_name_by_route: Mapping[StorageRoute, str] | None = None,
     ) -> None:
         self.symbols = normalize_symbols(symbols)
         self._symbol_set = set(self.symbols)
@@ -90,6 +92,13 @@ class MultiStreamStatsCollector:
         }
         self._last_connection_ids: dict[str, str] = {}
         self._connection_changes = {group: 0 for group in CONNECTION_GROUP_BY_KEY}
+        configured_names = dict(collection_name_by_route or {})
+        unknown_routes = set(configured_names) - set(STORAGE_ROUTES)
+        if unknown_routes:
+            raise ValueError("알 수 없는 논리 저장 경로의 컬렉션 이름입니다.")
+        self._collection_name_by_route = {
+            route: configured_names.get(route, route.value) for route in STORAGE_ROUTES
+        }
         self._collections = {
             route: {
                 "accepted": 0,
@@ -246,6 +255,7 @@ class MultiStreamStatsCollector:
         for route, state in self._collections.items():
             duration = state["last_batch_duration_ms"]
             collection_snapshots[route] = CollectionStatsSnapshot(
+                collection_name=self._collection_name_by_route[route],
                 accepted=int(state["accepted"]),
                 persisted=int(state["persisted"]),
                 pending=int(state["pending"]),

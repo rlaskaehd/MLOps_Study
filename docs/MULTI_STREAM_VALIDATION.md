@@ -23,7 +23,7 @@ python -m unittest discover -s tests -v
 ```
 
 - `pip check`: 손상된 의존성 없음
-- 전체 자동화 테스트: 99개 중 97개 성공, 기존 실제 MongoDB 선택 테스트 1개와 신규 다중 컬렉션 선택 테스트 1개는 기본 실행에서 제외
+- 전체 자동화 테스트: 103개 중 101개 성공, 기존 실제 MongoDB 선택 테스트 1개와 신규 다중 컬렉션 선택 테스트 1개는 기본 실행에서 제외
 - `python -m src.run_mongodb --help`: `legacy`, `multi-stream` profile과 세 스트림 옵션 노출 확인
 - Python 소스 및 테스트 `compileall`: 성공
 
@@ -35,7 +35,15 @@ STUDYGROUP_MONGO_MULTI_INTEGRATION=1 \
   python -m unittest tests.test_mongodb_multi_integration -v
 ```
 
-6개 고유 임시 컬렉션에 스트림별 문서를 한 건씩 저장하고 원본 문자열 타입과 문서 수를 확인했다. 검증 컬렉션은 테스트 종료 시 삭제했다.
+환경변수 로더에 6개 고유 임시 컬렉션 이름을 전달한 뒤 스트림별 문서를 한 건씩 저장하고 원본 문자열 타입과 문서 수를 확인했다. 검증 컬렉션은 테스트 종료 시 삭제했다.
+
+## 컬렉션 환경변수 설정 검증
+
+- 수집 명세와 통계는 MongoDB 물리 이름 대신 `StorageRoute`를 사용한다.
+- `multi-stream` 실행은 6개 컬렉션 환경변수를 모두 요구하며 누락·공백·중복 이름을 연결 전에 거부한다.
+- 출력 객체는 완전한 논리 경로 → 물리 컬렉션 매핑을 필수로 받는다.
+- 사용자 지정 물리 이름이 출력, 인덱스 생성, 통계와 TUI까지 전달됨을 자동화 테스트와 실제 MongoDB 선택 테스트로 확인했다.
+- `src/`에서 확장 프로필의 6개 예시 물리 이름을 검색했으며 하드코딩된 결과가 없음을 확인했다. 기존 `legacy`의 `DATALAKE_COLLECTION_NAME` 계약은 유지한다.
 
 ## 실제 Binance 상품과 WebSocket 검증
 

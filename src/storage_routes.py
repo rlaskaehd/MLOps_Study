@@ -11,7 +11,7 @@ class StorageRoute(str, Enum):
     """물리 저장소 이름과 독립적인 이벤트 목적지."""
 
     AGG_TRADE = "agg_trade"
-    ORDER_BOOK_DEPTH = "order_book_depth"
+    ORDER_BOOK_DEPTH = "depth"
     BOOK_TICKER = "book_ticker"
     KLINE = "kline"
     MARK_PRICE = "mark_price"

@@ -5,7 +5,11 @@ import unittest
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
-from src.config import MultiStreamConfig, load_mongo_config
+from src.config import (
+    MultiMongoCollectionConfig,
+    MultiStreamConfig,
+    load_mongo_config,
+)
 from src.main import run_collector
 from src.models.event import Event
 from src.run_mongodb import (
@@ -14,7 +18,13 @@ from src.run_mongodb import (
     parse_mongodb_args,
     parse_symbols,
 )
-from src.storage_routes import StorageRoute
+from src.storage_routes import STORAGE_ROUTES, StorageRoute
+
+
+def multi_collection_config() -> MultiMongoCollectionConfig:
+    return MultiMongoCollectionConfig(
+        {route: f"runtime_{route.value}" for route in STORAGE_ROUTES}
+    )
 
 
 class RecordingMongoOutput:
@@ -54,6 +64,7 @@ class RecordingMultiMongoOutput:
         self._on_batch_persisted = on_batch_persisted
         self._on_state_changed = on_state_changed
         self._on_buffer_changed = on_buffer_changed
+        self.collection_name_map = options["collection_name_map"]
 
     async def open(self) -> None:
         return None
@@ -121,6 +132,7 @@ class MongoRunnerTests(unittest.IsolatedAsyncioTestCase):
         specs, stats, output = build_multi_stream_runtime(
             MultiStreamConfig(symbols=("BTCUSDT",), validate_symbols=False),
             load_mongo_config(environ={}),
+            multi_collection_config(),
             output_factory=RecordingMultiMongoOutput,
         )
         assert isinstance(output, RecordingMultiMongoOutput)
@@ -131,7 +143,12 @@ class MongoRunnerTests(unittest.IsolatedAsyncioTestCase):
         snapshot = stats.snapshot()
 
         self.assertEqual(len(specs), 5)
+        self.assertEqual(
+            output.collection_name_map[StorageRoute.AGG_TRADE],
+            "runtime_agg_trade",
+        )
         route_stats = snapshot.collections[StorageRoute.AGG_TRADE]
+        self.assertEqual(route_stats.collection_name, "runtime_agg_trade")
         self.assertEqual(route_stats.state, "연결됨")
         self.assertEqual(route_stats.pending, 2)
         self.assertEqual(route_stats.pending_bytes, 512)

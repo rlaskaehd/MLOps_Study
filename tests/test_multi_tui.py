@@ -7,7 +7,7 @@ from rich.console import Console
 
 from src.monitoring.multi_stats import MultiStreamStatsCollector
 from src.monitoring.multi_tui import MultiStreamTuiRenderer
-from src.storage_routes import StorageRoute
+from src.storage_routes import STORAGE_ROUTES, StorageRoute
 
 
 class FakeClock:
@@ -21,7 +21,13 @@ class FakeClock:
 class MultiStreamTuiTests(unittest.TestCase):
     def test_renders_matrix_connections_and_collection_metrics(self) -> None:
         clock = FakeClock()
-        stats = MultiStreamStatsCollector(("BTCUSDT", "ETHUSDT"), clock=clock)
+        stats = MultiStreamStatsCollector(
+            ("BTCUSDT", "ETHUSDT"),
+            clock=clock,
+            collection_name_by_route={
+                route: f"deployed_{route.value}" for route in STORAGE_ROUTES
+            },
+        )
         trade = {
             "meta": {
                 "stream_type": "aggTrade",
@@ -58,6 +64,7 @@ class MultiStreamTuiTests(unittest.TestCase):
         self.assertIn("spot_market", rendered)
         self.assertIn("30개 구독 확인", rendered)
         self.assertIn("agg_trade", rendered)
+        self.assertIn("deployed_agg_trade", rendered)
         self.assertIn("적재 확인", rendered)
         self.assertIn("100ms", rendered)
 

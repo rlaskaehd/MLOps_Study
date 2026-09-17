@@ -113,7 +113,8 @@ class MultiStreamTuiRenderer:
             )
 
         collections = Table(expand=True, box=None, pad_edge=False)
-        collections.add_column("컬렉션")
+        collections.add_column("저장 경로")
+        collections.add_column("MongoDB 컬렉션")
         collections.add_column("상태")
         collections.add_column("접수", justify="right")
         collections.add_column("적재 확인", justify="right")
@@ -126,6 +127,7 @@ class MultiStreamTuiRenderer:
                 duration = f"{state.last_batch_size:,} / {state.last_batch_duration_ms:,.1f}ms"
             collections.add_row(
                 route.value,
+                state.collection_name,
                 state.state,
                 f"{state.accepted:,}",
                 f"{state.persisted:,}",

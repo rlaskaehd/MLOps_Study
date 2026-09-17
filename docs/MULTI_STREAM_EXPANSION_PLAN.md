@@ -1,6 +1,6 @@
 # Binance 수집기 다중 스트림 확장 계획
 
-작성 기준: 2026-09-17. Phase 11–15와 Phase 16의 실행 통합·단기 검증까지 구현했다. 30분 및 26시간 안정성 검증은 아직 수행하지 않았으며 실제 결과는 `MULTI_STREAM_VALIDATION.md`에 기록한다.
+작성 기준: 2026-09-17. Phase 11–15, Phase 16의 실행 통합·단기 검증과 Phase 17–18의 컬렉션 설정 분리를 구현했다. 30분 및 26시간 안정성 검증은 아직 수행하지 않았으며 실제 결과는 `MULTI_STREAM_VALIDATION.md`에 기록한다.
 
 문서 안의 소스·산출물 경로는 `/Users/ahh/Sandbox/finance/collector`를 기준으로 한다.
 
@@ -49,7 +49,7 @@ DOGEUSDT ADAUSDT AVAXUSDT LINKUSDT LTCUSDT
 
 여기서 틱 수집은 **수신한 스트림 갱신을 샘플링하거나 합치지 않고 전부 기록**한다는 뜻이다. MongoDB의 배치 주기는 저장 요청을 묶는 주기이며 데이터 집계 주기가 아니다.
 
-| Stream | 시장 | 구독 이름 | Collection | 수집 기준 |
+| Stream | 시장 | 구독 이름 | `.env.example`의 Collection 예시 | 수집 기준 |
 |---|---|---|---|---|
 | `aggTrade` | Spot | `<symbol>@aggTrade` | `agg_trades` | 집계 체결 이벤트가 도착할 때마다 저장 |
 | `depth` | Spot | `<symbol>@depth@100ms` | `order_book_depth` | 전달된 호가 변경 메시지를 모두 저장 |
@@ -155,7 +155,18 @@ flowchart TD
 
 ## 6. MongoDB 컬렉션과 배치
 
-요청한 5개 컬렉션에는 해당 시장 데이터만 저장한다. 구독 ACK·오류, 서버 안내, 미분류 메시지, 원문 보존 메시지는 `collector_control`에 저장한다. 이는 현재 보존하던 비거래 메시지의 저장 위치를 분리하기 위한 보조 컬렉션이다. 로컬에서 생성한 재연결·장애 로그와 수신 메시지 건수는 별도로 계수한다.
+논리 저장 경로 5개에는 해당 시장 데이터만 전달한다. 구독 ACK·오류, 서버 안내, 미분류 메시지, 원문 보존 메시지는 제어 경로로 전달한다. 실제 MongoDB 컬렉션 이름은 아래 환경변수로 주입하며 `.env.example` 값은 배포용 예시다. 여섯 이름은 필수이고 서로 달라야 한다.
+
+| 논리 경로 | 환경변수 | `.env.example` 값 |
+|---|---|---|
+| aggTrade | `DATALAKE_AGG_TRADES_COLLECTION_NAME` | `agg_trades` |
+| depth | `DATALAKE_ORDER_BOOK_DEPTH_COLLECTION_NAME` | `order_book_depth` |
+| bookTicker | `DATALAKE_BOOK_TICKERS_COLLECTION_NAME` | `book_tickers` |
+| kline | `DATALAKE_KLINES_COLLECTION_NAME` | `klines` |
+| markPrice | `DATALAKE_MARK_PRICES_COLLECTION_NAME` | `mark_prices` |
+| control | `DATALAKE_COLLECTOR_CONTROL_COLLECTION_NAME` | `collector_control` |
+
+수집 명세와 통계는 물리 이름을 사용하지 않는다. `StorageRoute`가 이벤트 종류를 나타내고 MongoDB 출력 경계에서만 환경변수의 물리 이름으로 변환한다. 환경변수 변경은 이후 적재 위치만 바꾸며 기존 컬렉션을 이동·삭제하지 않는다.
 
 `MongoMultiCollectionOutput`을 출력 구성 지점에 연결하고, MongoDB 클라이언트 하나를 공유한다. 각 컬렉션은 순서가 있는 큐와 순차 writer 하나를 가지며 전체 동시 쓰기 수를 제한한다. 한 컬렉션의 배치 결과를 다른 컬렉션의 성공으로 계수하지 않는다.
 
@@ -218,7 +229,7 @@ TUI는 symbol 10행, 스트림 5열의 최근 1초 수신량을 기본으로 표
 
 ## 9. Phase–Step 구현 순서
 
-Phase 11–15와 Phase 16의 실행 통합·단기 검증은 완료했다. 각 Phase 또는 핵심 Step은 관련 검증 후 독립 로컬 커밋으로 관리했다. Phase 16의 30분·26시간 장시간 검증은 미완료다.
+Phase 11–15, Phase 16의 실행 통합·단기 검증과 Phase 17–18의 설정 분리는 완료했다. 각 Phase 또는 핵심 Step은 관련 검증 후 독립 로컬 커밋으로 관리했다. Phase 16의 30분·26시간 장시간 검증은 미완료다.
 
 | Phase | Step | 구현 내용 | 주요 산출물 | 완료 기준 |
 |---|---|---|---|---|
@@ -234,12 +245,16 @@ Phase 11–15와 Phase 16의 실행 통합·단기 검증은 완료했다. 각 P
 | 15. 관측 | 2 | depth 연속성·연결 공백·지연 관측 | 유한 상태의 연속성 관측 모듈, 테스트 | 이벤트 변경 없이 누락 의심·공백 표시 |
 | 16. 통합 검증 | 1 | 회귀·30분 라이브·부하/장애 검증 | 기존 및 신규 테스트, 검증 기록 | 실제 sink 기준 50개 조합과 보존 계약 확인 |
 | 16. 통합 검증 | 2 | 26시간 검증·용량 산정·운영 안내 | `README.md`, 신규 `docs/MULTI_STREAM_VALIDATION.md` | 재연결·메모리·큐 안정성 근거와 미검증 사항 기록 |
+| 17. 설정 분리 | 1 | 논리 저장 경로와 물리 컬렉션 이름 분리 | `src/storage_routes.py`, 수집·출력·통계 모듈 | 수집 명세에 MongoDB 이름이 포함되지 않음 |
+| 17. 설정 분리 | 2 | 여섯 컬렉션 환경변수 로더와 검증 | `src/config.py`, 설정 테스트 | 사용자 지정값 로드, 누락·공백·중복 시작 전 거부 |
+| 18. 실행 연결 | 1 | 설정을 출력·통계·TUI에 주입 | `run_mongodb.py`, MongoDB 출력, TUI | 설정된 물리 이름으로 적재·인덱스·상태 표시 |
+| 18. 실행 연결 | 2 | 예시·운영 문서와 실제 MongoDB 검증 갱신 | `.env.example`, `README.md`, 통합 테스트 | legacy 회귀 유지, 사용자 지정 임시 컬렉션 검증 |
 
 구현 순서는 **계약 → 파서 → 연결 → 저장 → 관측 → 라이브 검증**이다. 각 단계에서 모의 입력으로 검증하고, 실제 수집에서는 stream 종류를 순차 활성화하며 문제를 좁힌다. 최종 검증의 symbol 범위는 항상 기존 10개다.
 
 ## 10. 적용과 완료 판단
 
-기존 실행과 기존 `binance_events` 데이터는 유지하고, 명시적으로 확장 profile을 선택했을 때 새로운 수집·저장 구조를 사용한다. 기존 문서를 자동 이동·변환하지 않는다. `DATALAKE_COLLECTION_NAME`은 기존 profile의 단일 컬렉션 설정으로 유지하고, 확장 profile은 위 매핑을 사용한다. 시작 로그에 실제 시장·구독·DB·컬렉션 설정을 표시해 적용 범위를 확인할 수 있게 한다.
+기존 실행과 기존 `binance_events` 데이터는 유지하고, 명시적으로 확장 profile을 선택했을 때 새로운 수집·저장 구조를 사용한다. 기존 문서를 자동 이동·변환하지 않는다. `DATALAKE_COLLECTION_NAME`은 기존 profile의 단일 컬렉션 설정으로 유지하고, 확장 profile은 여섯 환경변수의 물리 이름을 사용한다. TUI에 논리 경로와 실제 MongoDB 컬렉션을 함께 표시해 적용 범위를 확인할 수 있게 한다.
 
 다음 명령으로 구현된 확장 profile을 실행한다.
 

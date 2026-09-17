@@ -18,8 +18,10 @@ from src.config import (
     CollectorConfig,
     ConfigurationError,
     MongoConfig,
+    MultiMongoCollectionConfig,
     MultiStreamConfig,
     load_mongo_config,
+    load_multi_mongo_collection_config,
     normalize_symbols,
     validate_terminal_config,
 )
@@ -127,6 +129,7 @@ def build_mongodb_runtime(
 def build_multi_stream_runtime(
     config: MultiStreamConfig,
     mongo_config: MongoConfig,
+    collection_config: MultiMongoCollectionConfig,
     *,
     output_factory: Callable[..., EventOutput] = MongoMultiCollectionOutput,
     output_options: dict[str, Any] | None = None,
@@ -139,8 +142,13 @@ def build_multi_stream_runtime(
         depth_speed=config.depth_speed,
         mark_price_speed=config.mark_price_speed,
     )
-    stats = MultiStreamStatsCollector(config.symbols)
+    collection_names = collection_config.collection_name_by_route
+    stats = MultiStreamStatsCollector(
+        config.symbols,
+        collection_name_by_route=collection_names,
+    )
     options = dict(output_options or {})
+    options["collection_name_map"] = collection_names
     output = output_factory(
         mongo_config,
         on_batch_persisted=stats.record_batch_persisted,
@@ -155,6 +163,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parse_mongodb_args(argv)
     try:
         mongo_config = load_mongo_config()
+        collection_config = (
+            load_multi_mongo_collection_config()
+            if arguments.profile == "multi-stream"
+            else None
+        )
         terminal_config = CollectorConfig(
             symbols=arguments.symbols,
             mode="tui",
@@ -173,6 +186,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         stats, output = build_mongodb_runtime(arguments.symbols, mongo_config)
         configure_logging("tui", stats=stats)
     else:
+        assert collection_config is not None
         stream_config = MultiStreamConfig(
             symbols=arguments.symbols,
             kline_interval=arguments.kline_interval,
@@ -183,6 +197,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         specs, stats, output = build_multi_stream_runtime(
             stream_config,
             mongo_config,
+            collection_config,
         )
         configure_application_logging("tui", stats=stats)
     try:

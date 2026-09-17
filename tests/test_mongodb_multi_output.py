@@ -15,6 +15,16 @@ from src.outputs.mongodb_multi import (
 from src.storage_routes import STORAGE_ROUTES, StorageRoute
 
 
+TEST_COLLECTION_NAMES = {
+    StorageRoute.AGG_TRADE: "agg_trades",
+    StorageRoute.ORDER_BOOK_DEPTH: "order_book_depth",
+    StorageRoute.BOOK_TICKER: "book_tickers",
+    StorageRoute.KLINE: "klines",
+    StorageRoute.MARK_PRICE: "mark_prices",
+    StorageRoute.CONTROL: "collector_control",
+}
+
+
 class FakeAdmin:
     async def command(self, name: str) -> dict[str, int]:
         return {"ok": 1}
@@ -94,15 +104,25 @@ class MongoMultiCollectionOutputTests(unittest.IsolatedAsyncioTestCase):
         **options: Any,
     ) -> tuple[MongoMultiCollectionOutput, FakeClient]:
         active_client = client or FakeClient()
+        active_options: dict[str, Any] = {
+            "collection_name_map": TEST_COLLECTION_NAMES,
+            **options,
+        }
         output = MongoMultiCollectionOutput(
             load_mongo_config(environ={}),
             flush_interval=0.02,
             operation_timeout=1,
             shutdown_timeout=1,
             client_factory=lambda uri, **kwargs: active_client,
-            **options,
+            **active_options,
         )
         return output, active_client
+
+    def test_requires_physical_name_for_every_storage_route(self) -> None:
+        with self.assertRaisesRegex(ValueError, "물리 컬렉션 이름이 없는"):
+            self.make_output(
+                collection_name_map={StorageRoute.AGG_TRADE: "only_trades"}
+            )
 
     async def test_routes_all_streams_and_control_without_mutating_inputs(self) -> None:
         persisted: list[tuple[StorageRoute, int]] = []

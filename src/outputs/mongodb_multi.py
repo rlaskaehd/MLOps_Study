@@ -94,18 +94,6 @@ class BufferBudget:
             self._condition.notify_all()
 
 
-DEFAULT_COLLECTION_NAME_BY_ROUTE: Mapping[StorageRoute, str] = MappingProxyType(
-    {
-        StorageRoute.AGG_TRADE: "agg_trades",
-        StorageRoute.ORDER_BOOK_DEPTH: "order_book_depth",
-        StorageRoute.BOOK_TICKER: "book_tickers",
-        StorageRoute.KLINE: "klines",
-        StorageRoute.MARK_PRICE: "mark_prices",
-        StorageRoute.CONTROL: "collector_control",
-    }
-)
-
-
 BatchPersistedCallback = Callable[[StorageRoute, int, float], None]
 StateChangedCallback = Callable[[StorageRoute | str, str], None]
 BufferChangedCallback = Callable[[StorageRoute, int, int, int, int], None]
@@ -118,8 +106,8 @@ class MongoMultiCollectionOutput(EventOutput):
         self,
         config: MongoConfig,
         *,
+        collection_name_map: Mapping[StorageRoute, str],
         routes: Sequence[StorageRoute] = STORAGE_ROUTES,
-        collection_name_map: Mapping[StorageRoute, str] | None = None,
         flush_interval: float = 1.0,
         buffer_max_documents: int = 10_000,
         buffer_max_bytes: int = 64 * 1024 * 1024,
@@ -149,17 +137,21 @@ class MongoMultiCollectionOutput(EventOutput):
         active_routes = tuple(dict.fromkeys(routes))
         if set(STORAGE_ROUTES) - set(active_routes):
             raise ValueError("다중 스트림의 5개 데이터 경로와 제어 경로가 필요합니다.")
-        configured_names = dict(DEFAULT_COLLECTION_NAME_BY_ROUTE)
-        provided_names = dict(collection_name_map or {})
+        provided_names = dict(collection_name_map)
         unknown_routes = set(provided_names) - set(active_routes)
         if unknown_routes:
             raise ValueError(
                 "알 수 없는 논리 저장 경로입니다: "
                 + ", ".join(sorted(route.value for route in unknown_routes))
             )
-        configured_names.update(provided_names)
+        missing_routes = set(active_routes) - set(provided_names)
+        if missing_routes:
+            raise ValueError(
+                "물리 컬렉션 이름이 없는 논리 저장 경로입니다: "
+                + ", ".join(sorted(route.value for route in missing_routes))
+            )
         physical_names = {
-            route: configured_names[route] for route in active_routes
+            route: provided_names[route].strip() for route in active_routes
         }
         if any(not name.strip() for name in physical_names.values()):
             raise ValueError("MongoDB 물리 컬렉션 이름은 비어 있을 수 없습니다.")
@@ -168,7 +160,7 @@ class MongoMultiCollectionOutput(EventOutput):
 
         self.config = config
         self.routes = active_routes
-        self.collection_name_map = MappingProxyType(physical_names)
+        self.collection_name_by_route = MappingProxyType(physical_names)
         self.flush_interval = flush_interval
         self.batch_max_documents = min(batch_max_documents, buffer_max_documents)
         self.batch_max_bytes = min(batch_max_bytes, buffer_max_bytes)
@@ -231,7 +223,7 @@ class MongoMultiCollectionOutput(EventOutput):
             )
             database = client[self.config.database]
             self._mongo_collections = {
-                route: database[self.collection_name_map[route]]
+                route: database[self.collection_name_by_route[route]]
                 for route in self.routes
             }
             if self.create_indexes:

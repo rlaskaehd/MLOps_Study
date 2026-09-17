@@ -7,7 +7,11 @@ from contextlib import suppress
 
 from pymongo import AsyncMongoClient
 
-from src.config import load_mongo_config
+from src.config import (
+    MULTI_COLLECTION_ENV_BY_ROUTE,
+    load_mongo_config,
+    load_multi_mongo_collection_config,
+)
 from src.outputs.mongodb_multi import MongoMultiCollectionOutput
 from src.storage_routes import STORAGE_ROUTES
 
@@ -36,9 +40,15 @@ class LocalMultiMongoIntegrationTests(unittest.IsolatedAsyncioTestCase):
         config = load_mongo_config()
         prefix = f"multi_integration_{uuid.uuid4().hex}_"
         names = {route: f"{prefix}{route.value}" for route in STORAGE_ROUTES}
+        collection_config = load_multi_mongo_collection_config(
+            environ={
+                MULTI_COLLECTION_ENV_BY_ROUTE[route]: physical_name
+                for route, physical_name in names.items()
+            }
+        )
         output = MongoMultiCollectionOutput(
             config,
-            collection_name_map=names,
+            collection_name_map=collection_config.collection_name_by_route,
             flush_interval=0.01,
         )
         inspector = AsyncMongoClient(

@@ -153,6 +153,8 @@ mongosh mongodb://localhost:27017/studygroup \
 
 확장 프로필은 기존 10개 symbol을 유지하면서 50개 스트림을 세 WebSocket 연결로 수집한다. Spot 일반 스트림 30개, Spot depth 10개, USDⓈ-M markPrice 10개다. 시작 전에 공개 상품 목록을 조회해 모든 symbol이 Spot 거래와 USDⓈ-M USDT 무기한 선물 조건을 충족하는지 확인한다.
 
+확장 프로필의 물리 컬렉션 이름은 `.env`의 아래 6개 환경변수로 지정한다. `cp .env.example .env`로 만든 설정에는 예시 이름이 들어 있으며 배포 환경에 맞게 각각 변경할 수 있다. 여섯 값은 모두 필요하고 서로 달라야 한다. 누락·공백·중복 이름은 Binance나 MongoDB에 연결하기 전에 설정 오류로 종료한다.
+
 ```bash
 conda activate sandbox
 python -m src.run_mongodb --profile multi-stream
@@ -171,14 +173,16 @@ python -m src.run_mongodb \
 
 네트워크가 없는 상태에서 설정·로컬 저장 경로만 점검할 때는 `--skip-symbol-validation`을 사용할 수 있다. 이 옵션은 WebSocket 연결 자체를 오프라인으로 바꾸지 않는다. 기본 profile은 `legacy`이므로 기존 명령의 동작과 `binance_events` 컬렉션은 유지된다.
 
-| 시장 | 스트림 | 기본 구독 | MongoDB 컬렉션 |
+| 시장 | 스트림 | 컬렉션 환경변수 | `.env.example` 값 |
 |---|---|---|---|
-| Spot | `aggTrade` | `<symbol>@aggTrade` | `agg_trades` |
-| Spot | `depth` | `<symbol>@depth@100ms` | `order_book_depth` |
-| Spot | `bookTicker` | `<symbol>@bookTicker` | `book_tickers` |
-| Spot | `kline` | `<symbol>@kline_1m` | `klines` |
-| USDⓈ-M | `markPrice` | `<symbol>@markPrice@1s` | `mark_prices` |
-| 연결 제어 | ACK, 안내, 미분류·원문 보존 | 해당 연결 | `collector_control` |
+| Spot | `aggTrade` | `DATALAKE_AGG_TRADES_COLLECTION_NAME` | `agg_trades` |
+| Spot | `depth` | `DATALAKE_ORDER_BOOK_DEPTH_COLLECTION_NAME` | `order_book_depth` |
+| Spot | `bookTicker` | `DATALAKE_BOOK_TICKERS_COLLECTION_NAME` | `book_tickers` |
+| Spot | `kline` | `DATALAKE_KLINES_COLLECTION_NAME` | `klines` |
+| USDⓈ-M | `markPrice` | `DATALAKE_MARK_PRICES_COLLECTION_NAME` | `mark_prices` |
+| 연결 제어 | ACK, 안내, 미분류·원문 보존 | `DATALAKE_COLLECTOR_CONTROL_COLLECTION_NAME` | `collector_control` |
+
+환경변수를 변경하면 이후 문서부터 새 컬렉션으로 적재한다. 기존 컬렉션을 이름 변경·이동·삭제하지 않는다. TUI의 저장 영역에는 논리 저장 경로와 실제 MongoDB 컬렉션 이름을 함께 표시한다.
 
 확장 문서는 다음 v2 구조를 사용한다.
 
@@ -206,7 +210,7 @@ python -m src.run_mongodb \
 }
 ```
 
-`data`는 스트림 의미에 맞게 최상위 필드 이름만 바꾸고 값·자료형·중첩 필드·추가 필드를 유지한다. `kline`은 진행 중 갱신과 마감 갱신을 모두 append하며 upsert하지 않는다. `order_book_depth`에는 diff 이벤트를 저장하며 완성된 호가창 snapshot은 만들지 않는다.
+`data`는 스트림 의미에 맞게 최상위 필드 이름만 바꾸고 값·자료형·중첩 필드·추가 필드를 유지한다. `kline`은 진행 중 갱신과 마감 갱신을 모두 append하며 upsert하지 않는다. depth용으로 설정한 컬렉션에는 diff 이벤트를 저장하며 완성된 호가창 snapshot은 만들지 않는다.
 
 MongoDB 출력은 컬렉션별 순차 writer를 사용하고 전체 동시 쓰기를 3개로 제한한다. 큐와 처리 중 배치를 합쳐 최대 10,000건·64MiB를 유지하며, 한 배치는 최대 1,000건·4MiB다. 유휴 writer는 첫 이벤트 후 1초 안에 flush를 시도한다. MongoDB가 확인한 문서만 적재 완료로 계수하며 결과가 불확실한 배치는 자동 재전송하지 않는다.
 
@@ -337,6 +341,6 @@ STUDYGROUP_MONGO_MULTI_INTEGRATION=1 \
 
 Python 3.11, Linux, Windows에서는 아직 직접 실행하지 않았다. `requirements.txt`에는 기존 패키지와 함께 `pymongo==4.18.0`, `python-dotenv==1.2.3`이 고정되어 있다. MongoDB 검증 세부 결과는 [docs/MONGODB_VALIDATION.md](docs/MONGODB_VALIDATION.md)에 기록한다.
 
-2026-09-17에는 macOS 26.6(arm64), Conda `sandbox`의 Python 3.12.13, MongoDB 8.0.28에서 확장 프로필을 검증했다. 전체 자동화 테스트 99개 중 97개가 성공하고 실제 MongoDB 선택 테스트 2개는 기본 실행에서 제외됐다. 별도로 다중 컬렉션 MongoDB 통합 테스트 1개도 성공했다. 실제 Binance 20초 수신에서는 5종 모두에서 10개 symbol을 확인했고, 별도의 12초 실제 sink 검증에서는 2,384건의 수신·큐 접수·적재 확인이 일치하고 미확인 0건을 확인했다. 30분·26시간 안정성 검증은 아직 수행하지 않았다. 세부 결과는 [docs/MULTI_STREAM_VALIDATION.md](docs/MULTI_STREAM_VALIDATION.md)에 기록한다.
+2026-09-17에는 macOS 26.6(arm64), Conda `sandbox`의 Python 3.12.13, MongoDB 8.0.28에서 확장 프로필을 검증했다. 컬렉션 환경변수 분리 후 전체 자동화 테스트 103개 중 101개가 성공하고 실제 MongoDB 선택 테스트 2개는 기본 실행에서 제외됐다. 별도로 사용자 지정 이름을 사용하는 다중 컬렉션 MongoDB 통합 테스트 1개도 성공했다. 실제 Binance 20초 수신에서는 5종 모두에서 10개 symbol을 확인했고, 별도의 12초 실제 sink 검증에서는 2,384건의 수신·큐 접수·적재 확인이 일치하고 미확인 0건을 확인했다. 30분·26시간 안정성 검증은 아직 수행하지 않았다. 세부 결과는 [docs/MULTI_STREAM_VALIDATION.md](docs/MULTI_STREAM_VALIDATION.md)에 기록한다.
 
 상세 구현 범위와 완료 기준은 [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)를 따른다.

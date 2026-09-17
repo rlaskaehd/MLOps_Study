@@ -2,7 +2,20 @@
 
 import unittest
 
-from src.config import ConfigurationError, load_mongo_config
+from src.config import (
+    MULTI_COLLECTION_ENV_BY_ROUTE,
+    ConfigurationError,
+    load_mongo_config,
+    load_multi_mongo_collection_config,
+)
+from src.storage_routes import StorageRoute
+
+
+def multi_collection_environment() -> dict[str, str]:
+    return {
+        environment_name: f"deployed_{route.value}"
+        for route, environment_name in MULTI_COLLECTION_ENV_BY_ROUTE.items()
+    }
 
 
 class MongoConfigTests(unittest.TestCase):
@@ -65,6 +78,45 @@ class MongoConfigTests(unittest.TestCase):
     def test_rejects_auth_source_without_credentials(self) -> None:
         with self.assertRaises(ConfigurationError):
             load_mongo_config(environ={"DATALAKE_AUTH_SOURCE": "admin"})
+
+
+class MultiMongoCollectionConfigTests(unittest.TestCase):
+    def test_loads_six_custom_collection_names_by_storage_route(self) -> None:
+        config = load_multi_mongo_collection_config(
+            environ=multi_collection_environment()
+        )
+
+        self.assertEqual(
+            config.collection_name_by_route[StorageRoute.AGG_TRADE],
+            "deployed_agg_trade",
+        )
+        self.assertEqual(
+            config.collection_name_by_route[StorageRoute.CONTROL],
+            "deployed_control",
+        )
+        self.assertEqual(len(config.collection_name_by_route), 6)
+
+    def test_rejects_missing_or_blank_collection_name(self) -> None:
+        environment = multi_collection_environment()
+        missing_name = MULTI_COLLECTION_ENV_BY_ROUTE[StorageRoute.MARK_PRICE]
+        environment.pop(missing_name)
+        with self.assertRaisesRegex(ConfigurationError, missing_name):
+            load_multi_mongo_collection_config(environ=environment)
+
+        environment = multi_collection_environment()
+        blank_name = MULTI_COLLECTION_ENV_BY_ROUTE[StorageRoute.CONTROL]
+        environment[blank_name] = "   "
+        with self.assertRaisesRegex(ConfigurationError, blank_name):
+            load_multi_mongo_collection_config(environ=environment)
+
+    def test_rejects_duplicate_physical_collection_names(self) -> None:
+        environment = multi_collection_environment()
+        environment[
+            MULTI_COLLECTION_ENV_BY_ROUTE[StorageRoute.BOOK_TICKER]
+        ] = environment[MULTI_COLLECTION_ENV_BY_ROUTE[StorageRoute.AGG_TRADE]]
+
+        with self.assertRaisesRegex(ConfigurationError, "서로 달라야"):
+            load_multi_mongo_collection_config(environ=environment)
 
 
 if __name__ == "__main__":

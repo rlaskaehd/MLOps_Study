@@ -8,10 +8,13 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import TextIO
 from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
+
+from src.storage_routes import STORAGE_ROUTES, StorageRoute
 
 
 DEFAULT_SYMBOLS = (
@@ -33,7 +36,24 @@ DEFAULT_MONGODB_PORT = 27017
 DEFAULT_MONGODB_DATABASE = "studygroup"
 DEFAULT_MONGODB_COLLECTION = "binance_events"
 
+MULTI_COLLECTION_ENV_BY_ROUTE: Mapping[StorageRoute, str] = MappingProxyType(
+    {
+        StorageRoute.AGG_TRADE: "DATALAKE_AGG_TRADES_COLLECTION_NAME",
+        StorageRoute.ORDER_BOOK_DEPTH: (
+            "DATALAKE_ORDER_BOOK_DEPTH_COLLECTION_NAME"
+        ),
+        StorageRoute.BOOK_TICKER: "DATALAKE_BOOK_TICKERS_COLLECTION_NAME",
+        StorageRoute.KLINE: "DATALAKE_KLINES_COLLECTION_NAME",
+        StorageRoute.MARK_PRICE: "DATALAKE_MARK_PRICES_COLLECTION_NAME",
+        StorageRoute.CONTROL: "DATALAKE_COLLECTOR_CONTROL_COLLECTION_NAME",
+    }
+)
+
 _SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]+$")
+
+
+class ConfigurationError(ValueError):
+    """프로그램을 안전하게 시작할 수 없는 설정인 경우."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +93,36 @@ class MongoConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MultiMongoCollectionConfig:
+    """논리 저장 경로별 MongoDB 물리 컬렉션 이름."""
+
+    collection_name_by_route: Mapping[StorageRoute, str]
+
+    def __post_init__(self) -> None:
+        names = {
+            route: collection_name.strip()
+            for route, collection_name in self.collection_name_by_route.items()
+        }
+        if set(names) != set(STORAGE_ROUTES):
+            raise ConfigurationError(
+                "다중 스트림의 5개 데이터 경로와 제어 경로 설정이 필요합니다."
+            )
+        if any(not collection_name for collection_name in names.values()):
+            raise ConfigurationError(
+                "다중 스트림 컬렉션 이름은 비어 있을 수 없습니다."
+            )
+        if len(set(names.values())) != len(names):
+            raise ConfigurationError(
+                "다중 스트림의 물리 컬렉션 이름은 서로 달라야 합니다."
+            )
+        object.__setattr__(
+            self,
+            "collection_name_by_route",
+            MappingProxyType(names),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class MultiStreamConfig:
     """다중 스트림 확장 실행에 필요한 수집 설정."""
 
@@ -93,15 +143,22 @@ class MultiStreamConfig:
         )
 
 
-class ConfigurationError(ValueError):
-    """프로그램을 안전하게 시작할 수 없는 설정인 경우."""
-
-
 def _optional_setting(value: str | None) -> str | None:
     if value is None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _environment_source(
+    *,
+    environ: Mapping[str, str] | None,
+    env_file: Path | None,
+) -> Mapping[str, str]:
+    if environ is not None:
+        return environ
+    load_dotenv(env_file or PROJECT_ROOT / ".env", override=False)
+    return os.environ
 
 
 def load_mongo_config(
@@ -111,11 +168,7 @@ def load_mongo_config(
 ) -> MongoConfig:
     """프로젝트 루트의 .env와 환경 변수에서 MongoDB 설정을 읽는다."""
 
-    if environ is None:
-        load_dotenv(env_file or PROJECT_ROOT / ".env", override=False)
-        source: Mapping[str, str] = os.environ
-    else:
-        source = environ
+    source = _environment_source(environ=environ, env_file=env_file)
 
     host = (source.get("DATALAKE_HOST") or DEFAULT_MONGODB_HOST).strip()
     port_text = (source.get("DATALAKE_PORT") or str(DEFAULT_MONGODB_PORT)).strip()
@@ -166,6 +219,41 @@ def load_mongo_config(
         database=database,
         collection=collection,
     )
+
+
+def load_multi_mongo_collection_config(
+    *,
+    environ: Mapping[str, str] | None = None,
+    env_file: Path | None = None,
+) -> MultiMongoCollectionConfig:
+    """환경변수에서 확장 프로필의 물리 컬렉션 이름을 읽는다."""
+
+    source = _environment_source(environ=environ, env_file=env_file)
+    names: dict[StorageRoute, str] = {}
+    missing: list[str] = []
+    blank: list[str] = []
+    for route, environment_name in MULTI_COLLECTION_ENV_BY_ROUTE.items():
+        raw_value = source.get(environment_name)
+        if raw_value is None:
+            missing.append(environment_name)
+            continue
+        collection_name = raw_value.strip()
+        if not collection_name:
+            blank.append(environment_name)
+            continue
+        names[route] = collection_name
+
+    if missing:
+        raise ConfigurationError(
+            "필수 다중 스트림 컬렉션 환경변수가 없습니다: "
+            + ", ".join(missing)
+        )
+    if blank:
+        raise ConfigurationError(
+            "다중 스트림 컬렉션 이름은 비어 있을 수 없습니다: "
+            + ", ".join(blank)
+        )
+    return MultiMongoCollectionConfig(names)
 
 
 def normalize_symbols(values: Sequence[str]) -> tuple[str, ...]:

@@ -72,6 +72,27 @@ class MongoConfig:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class MultiStreamConfig:
+    """다중 스트림 확장 실행에 필요한 수집 설정."""
+
+    symbols: tuple[str, ...] = DEFAULT_SYMBOLS
+    kline_interval: str = "1m"
+    depth_speed: str = "100ms"
+    mark_price_speed: str = "1s"
+    validate_symbols: bool = True
+
+    def __post_init__(self) -> None:
+        from src.collector.streams import validate_stream_options
+
+        object.__setattr__(self, "symbols", normalize_symbols(self.symbols))
+        validate_stream_options(
+            kline_interval=self.kline_interval,
+            depth_speed=self.depth_speed,
+            mark_price_speed=self.mark_price_speed,
+        )
+
+
 class ConfigurationError(ValueError):
     """프로그램을 안전하게 시작할 수 없는 설정인 경우."""
 
